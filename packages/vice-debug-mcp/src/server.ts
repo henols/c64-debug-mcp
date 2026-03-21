@@ -34,15 +34,6 @@ const breakpointSchema = z.object({
   label: z.string().nullable().optional().describe('Optional caller-provided label'),
 });
 
-const symbolSchema = z.object({
-  name: z.string().describe('Symbol name'),
-  address: address16Schema.describe('Start address of the symbol'),
-  endAddress: address16Schema.optional().describe('Optional end address of the symbol'),
-  source: z.string().optional().describe('Optional source file associated with the symbol'),
-  line: z.number().int().optional().describe('Optional source line associated with the symbol'),
-  kind: z.enum(['function', 'global', 'label']).describe('Symbol kind'),
-});
-
 function buildC64RegisterValueSchema() {
   return z.object(
     Object.fromEntries(
@@ -389,51 +380,6 @@ const autostartProgramTool = createViceTool({
   execute: async (input) => await viceSession.autostartProgram(input.filePath, input.runAfterLoading, input.fileIndex),
 });
 
-const loadSymbolsTool = createViceTool({
-  id: 'load_symbols',
-  description: 'Loads Oscar64 symbols from a JSON debug dump or assembly listing.',
-  inputSchema: z.object({
-    filePath: z.string(),
-  }),
-  dataSchema: z.object({
-    id: z.string(),
-    format: z.enum(['oscar64-json', 'oscar64-asm']),
-    filePath: z.string(),
-    symbolCount: z.number().int(),
-    loadedAt: z.string(),
-  }),
-  execute: async (input) => await viceSession.loadSymbols(input.filePath),
-});
-
-const listSymbolSourcesTool = createViceTool({
-  id: 'list_symbol_sources',
-  description: 'Lists loaded symbol sources.',
-  dataSchema: z.object({
-    sources: z.array(
-      z.object({
-        id: z.string(),
-        format: z.enum(['oscar64-json', 'oscar64-asm']),
-        filePath: z.string(),
-        symbolCount: z.number().int(),
-        loadedAt: z.string(),
-      }),
-    ),
-  }),
-  execute: async () => viceSession.listSymbolSources(),
-});
-
-const lookupSymbolTool = createViceTool({
-  id: 'lookup_symbol',
-  description: 'Looks up a loaded symbol by exact name.',
-  inputSchema: z.object({
-    name: z.string(),
-  }),
-  dataSchema: z.object({
-    symbol: symbolSchema,
-  }),
-  execute: async (input) => viceSession.lookupSymbol(input.name),
-});
-
 const captureDisplayTool = createViceTool({
   id: 'capture_display',
   description: 'Captures the current display and returns indexed pixel data plus a grayscale PNG fallback.',
@@ -499,7 +445,7 @@ export const viceDebugServer = new MCPServer({
   version: '0.1.0',
   description: 'Structured Mastra MCP server for VICE debugging with a config-driven self-healing managed emulator.',
   instructions:
-    'Set emulator config first. After that, use debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
+    'Set emulator config first. After that, use emulator-native debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
   tools: {
     get_emulator_status: getEmulatorStatusTool,
     set_emulator_config: setEmulatorConfigTool,
@@ -516,9 +462,6 @@ export const viceDebugServer = new MCPServer({
     breakpoint_clear: breakpointClearTool,
     load_program: loadProgramTool,
     autostart_program: autostartProgramTool,
-    load_symbols: loadSymbolsTool,
-    list_symbol_sources: listSymbolSourcesTool,
-    lookup_symbol: lookupSymbolTool,
     capture_display: captureDisplayTool,
     get_banks: getBanksTool,
     get_info: getInfoTool,

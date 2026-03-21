@@ -152,23 +152,6 @@ export interface Breakpoint {
   kind: BreakpointKind;
 }
 
-export interface SymbolItem {
-  name: string;
-  address: number;
-  endAddress?: number;
-  source?: string;
-  line?: number;
-  kind: 'function' | 'global' | 'label';
-}
-
-export interface SymbolSource {
-  id: string;
-  format: 'oscar64-json' | 'oscar64-asm';
-  filePath: string;
-  symbolCount: number;
-  loadedAt: string;
-}
-
 export const emulatorStatusSchema = z.object({
   configured: z.boolean(),
   status: sessionHealthSchema,

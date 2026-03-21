@@ -22,7 +22,6 @@ import {
   type WarningItem,
 } from './contracts.js';
 import { ViceMcpError, debuggerNotPausedError, sessionStateError, validationError } from './errors.js';
-import { SymbolStore } from './symbols.js';
 import { ViceMonitorClient } from './vice-protocol.js';
 
 function sleep(ms: number): Promise<void> {
@@ -243,7 +242,6 @@ type DebugState = {
 export class ViceSession {
   readonly #client = new ViceMonitorClient();
   readonly #portAllocator: PortAllocator;
-  readonly #symbols = new SymbolStore();
 
   #transportState: SessionState['transportState'] = 'not_started';
   #processState: SessionState['processState'] = 'not_applicable';
@@ -298,10 +296,6 @@ export class ViceSession {
         void this.#scheduleRecovery();
       }
     });
-  }
-
-  get symbols(): SymbolStore {
-    return this.#symbols;
   }
 
   snapshot(): SessionState {
@@ -964,46 +958,6 @@ export class ViceSession {
       pixelDataBase64: Buffer.from(response.imageBytes).toString('base64'),
       pngBase64,
       warnings,
-    };
-  }
-
-  async loadSymbols(filePath: string) {
-    return await this.#symbols.loadOscar64Symbols(filePath);
-  }
-
-  listSymbolSources() {
-    return {
-      sources: this.#symbols.listSources(),
-    };
-  }
-
-  lookupSymbol(name: string) {
-    const symbol = this.#symbols.lookup(name);
-    if (!symbol) {
-      throw new ViceMcpError('symbol_not_found', `Symbol not found: ${name}`, 'validation', false, { name });
-    }
-    return {
-      symbol,
-    };
-  }
-
-  async setBreakpointAtSymbol(name: string, condition?: string, temporary = false) {
-    const symbol = this.#symbols.lookup(name);
-    if (!symbol) {
-      throw new ViceMcpError('symbol_not_found', `Symbol not found: ${name}`, 'validation', false, { name });
-    }
-
-    const result = await this.setBreakpoint({
-      kind: 'exec',
-      start: symbol.address,
-      end: symbol.endAddress,
-      condition,
-      temporary,
-      label: symbol.name,
-    });
-    return {
-      symbol,
-      breakpoint: result.breakpoint,
     };
   }
 
