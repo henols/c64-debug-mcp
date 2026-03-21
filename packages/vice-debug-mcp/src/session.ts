@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import zlib from 'node:zlib';
 
@@ -10,8 +9,6 @@ import {
   DEFAULT_FORBIDDEN_PORTS,
   DEFAULT_MACHINE_TYPE,
   DEFAULT_MONITOR_HOST,
-  DEFAULT_RESUME_POLICY,
-  defaultMachineProfile,
   emulatorConfigSchema,
   type SessionHealth,
   type C64RegisterName,
@@ -19,7 +16,6 @@ import {
   type EmulatorConfig,
   type MemSpaceName,
   type ResponseMeta,
-  type ResumePolicy,
   type SessionState,
   type SessionStatus,
   type StopReason,
@@ -61,7 +57,6 @@ function resolveViceBinary(emulatorType: string): string {
 function defaultEmulatorConfig(): EmulatorConfig {
   return emulatorConfigSchema.parse({
     emulatorType: DEFAULT_MACHINE_TYPE,
-    resumePolicy: DEFAULT_RESUME_POLICY,
   });
 }
 
@@ -71,7 +66,6 @@ function normalizeConfig(config: EmulatorConfig): EmulatorConfig {
     binaryPath: config.binaryPath?.trim() || undefined,
     workingDirectory: config.workingDirectory?.trim() || undefined,
     arguments: config.arguments?.trim() || undefined,
-    resumePolicy: config.resumePolicy ?? DEFAULT_RESUME_POLICY,
   });
 }
 
@@ -251,12 +245,10 @@ export class ViceSession {
   readonly #portAllocator: PortAllocator;
   readonly #symbols = new SymbolStore();
 
-  #sessionId: string | null = null;
   #transportState: SessionState['transportState'] = 'not_started';
   #processState: SessionState['processState'] = 'not_applicable';
   #executionState: SessionState['executionState'] = 'unknown';
   #lastStopReason: StopReason = 'none';
-  #resumePolicy: ResumePolicy = DEFAULT_RESUME_POLICY;
   #machineType: string | null = null;
   #host: string | null = null;
   #port: number | null = null;
@@ -273,6 +265,7 @@ export class ViceSession {
   #launchId = 0;
   #restartCount = 0;
   #suppressRecovery = false;
+  #shuttingDown = false;
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
@@ -301,7 +294,7 @@ export class ViceSession {
       if (this.#transportState !== 'stopped') {
         this.#transportState = 'disconnected';
       }
-      if (!this.#suppressRecovery && this.#config) {
+      if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
         void this.#scheduleRecovery();
       }
     });
@@ -313,23 +306,11 @@ export class ViceSession {
 
   snapshot(): SessionState {
     return {
-      sessionId: this.#sessionId,
       transportState: this.#transportState,
-      emulatorOwnership: this.#config ? 'managed' : 'unknown',
       processState: this.#processState,
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
       machineType: this.#machineType,
-      machineProfile: defaultMachineProfile(this.#machineType),
-      binaryMonitorEndpoint: {
-        host: this.#host,
-        port: this.#port,
-      },
-      activePolicies: {
-        resumePolicy: this.#resumePolicy,
-      },
-      configPresent: this.#config != null,
-      managedByServer: this.#config != null,
       recoveryInProgress: this.#recoveryInProgress,
       launchId: this.#launchId,
       restartCount: this.#restartCount,
@@ -381,12 +362,7 @@ export class ViceSession {
   async setEmulatorConfig(config: EmulatorConfig): Promise<{ config: EmulatorConfig; session: SessionStatus }> {
     const nextConfig = normalizeConfig(config);
 
-    if (!this.#sessionId) {
-      this.#sessionId = randomUUID();
-    }
-
     this.#config = nextConfig;
-    this.#resumePolicy = nextConfig.resumePolicy ?? DEFAULT_RESUME_POLICY;
     this.#warnings = this.#warnings.filter((warning) => !warning.code.startsWith('launch_') && !warning.code.startsWith('process_'));
 
     await this.#replaceManagedEmulator('config_update');
@@ -410,7 +386,6 @@ export class ViceSession {
     this.#connectedSince = null;
     this.#lastStopReason = 'none';
     this.#executionState = 'unknown';
-    this.#resumePolicy = DEFAULT_RESUME_POLICY;
     this.#warnings = [];
 
     await this.#stopManagedProcess(true);
@@ -423,6 +398,32 @@ export class ViceSession {
       hadConfig,
       session: this.status(),
     };
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.#shuttingDown) {
+      return;
+    }
+
+    this.#shuttingDown = true;
+    this.#suppressRecovery = true;
+    this.#config = null;
+    this.#recoveryPromise = null;
+    this.#recoveryInProgress = false;
+    this.#freshEmulatorPending = false;
+
+    try {
+      await this.#stopManagedProcess(true);
+    } finally {
+      this.#transportState = 'stopped';
+      this.#processState = 'not_applicable';
+      this.#executionState = 'unknown';
+      this.#lastStopReason = 'none';
+      this.#host = null;
+      this.#port = null;
+      this.#connectedSince = null;
+      this.#lastRegisters = null;
+    }
   }
 
   takeResponseMeta(): ResponseMeta {
@@ -1154,10 +1155,6 @@ export class ViceSession {
   #ensureConfig(): EmulatorConfig {
     if (!this.#config) {
       this.#config = defaultEmulatorConfig();
-      this.#resumePolicy = this.#config.resumePolicy ?? DEFAULT_RESUME_POLICY;
-      if (!this.#sessionId) {
-        this.#sessionId = randomUUID();
-      }
     }
 
     return this.#config;
@@ -1177,7 +1174,7 @@ export class ViceSession {
         makeWarning(`VICE process exited (${code ?? 'null'} / ${signal ?? 'null'})`, 'process_exit'),
       ];
 
-      if (!this.#suppressRecovery && this.#config) {
+      if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
         void this.#scheduleRecovery();
       }
     });
@@ -1192,7 +1189,7 @@ export class ViceSession {
       this.#transportState = 'faulted';
       this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'process_error'), makeWarning(error.message, 'process_error')];
 
-      if (!this.#suppressRecovery && this.#config) {
+      if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
         void this.#scheduleRecovery();
       }
     });

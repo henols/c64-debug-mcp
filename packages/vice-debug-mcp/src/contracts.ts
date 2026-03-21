@@ -4,7 +4,6 @@ export const VICE_API_VERSION = 0x02;
 export const VICE_STX = 0x02;
 export const VICE_BROADCAST_REQUEST_ID = 0xffffffff;
 export const DEFAULT_MONITOR_HOST = '127.0.0.1';
-export const DEFAULT_RESUME_POLICY = 'preserve_pause_state' as const;
 export const DEFAULT_MACHINE_TYPE = 'c64' as const;
 export const DEFAULT_FORBIDDEN_PORTS = new Set([6502]);
 
@@ -20,7 +19,6 @@ export const transportStateSchema = z.enum([
   'faulted',
 ]);
 
-export const emulatorOwnershipSchema = z.enum(['external', 'managed', 'unknown']);
 export const processStateSchema = z.enum(['not_applicable', 'launching', 'running', 'exited', 'crashed']);
 export const executionStateSchema = z.enum(['unknown', 'running', 'paused', 'stopped_in_monitor']);
 export const stopReasonSchema = z.enum([
@@ -37,7 +35,6 @@ export const stopReasonSchema = z.enum([
   'unknown',
 ]);
 export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready', 'recovering', 'stopped', 'error']);
-export const resumePolicySchema = z.enum(['preserve_pause_state', 'resume_after_mutation', 'always_resume']);
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
 export const memSpaceSchema = z.enum(['main', 'drive8', 'drive9', 'drive10', 'drive11']);
@@ -46,7 +43,6 @@ export const emulatorConfigSchema = z.object({
   binaryPath: z.string().optional(),
   workingDirectory: z.string().optional(),
   arguments: z.string().optional(),
-  resumePolicy: resumePolicySchema.default(DEFAULT_RESUME_POLICY),
 });
 export const responseMetaSchema = z.object({
   freshEmulator: z.boolean(),
@@ -55,12 +51,10 @@ export const responseMetaSchema = z.object({
 });
 
 export type TransportState = z.infer<typeof transportStateSchema>;
-export type EmulatorOwnership = z.infer<typeof emulatorOwnershipSchema>;
 export type ProcessState = z.infer<typeof processStateSchema>;
 export type ExecutionState = z.infer<typeof executionStateSchema>;
 export type StopReason = z.infer<typeof stopReasonSchema>;
 export type SessionHealth = z.infer<typeof sessionHealthSchema>;
-export type ResumePolicy = z.infer<typeof resumePolicySchema>;
 export type BreakpointKind = z.infer<typeof breakpointKindSchema>;
 export type ResetMode = z.infer<typeof resetModeSchema>;
 export type MemSpaceName = z.infer<typeof memSpaceSchema>;
@@ -91,30 +85,12 @@ export interface ToolError {
   details?: Record<string, unknown>;
 }
 
-export interface MachineProfile {
-  machineType: string;
-  cpu: string;
-  registerNamespace: string;
-}
-
 export interface SessionState {
-  sessionId: string | null;
   transportState: TransportState;
-  emulatorOwnership: EmulatorOwnership;
   processState: ProcessState;
   executionState: ExecutionState;
   lastStopReason: StopReason;
   machineType: string | null;
-  machineProfile: MachineProfile | null;
-  binaryMonitorEndpoint: {
-    host: string | null;
-    port: number | null;
-  };
-  activePolicies: {
-    resumePolicy: ResumePolicy;
-  };
-  configPresent: boolean;
-  managedByServer: boolean;
   recoveryInProgress: boolean;
   launchId: number;
   restartCount: number;
@@ -261,20 +237,4 @@ export function cpuOperationToBreakpointKind(operation: number): BreakpointKind 
     return 'write';
   }
   return 'exec';
-}
-
-export function defaultMachineProfile(machineType: string | null): MachineProfile | null {
-  if (!machineType) {
-    return null;
-  }
-
-  if (machineType.startsWith('x64') || machineType === 'c64') {
-    return { machineType: 'c64', cpu: '6502', registerNamespace: '6502' };
-  }
-
-  if (machineType === 'x128') {
-    return { machineType: 'c128', cpu: '8502', registerNamespace: '6502' };
-  }
-
-  return { machineType, cpu: '6502-family', registerNamespace: '6502' };
 }
