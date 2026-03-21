@@ -129,8 +129,6 @@ export interface SessionStatus {
   configured: boolean;
   status: SessionHealth;
   machineType: string | null;
-  executionState: ExecutionState;
-  lastStopReason: StopReason;
   warnings: WarningItem[];
 }
 
@@ -195,12 +193,10 @@ export interface SymbolSource {
   loadedAt: string;
 }
 
-export const sessionStatusSchema = z.object({
+export const emulatorStatusSchema = z.object({
   configured: z.boolean(),
   status: sessionHealthSchema,
   machineType: z.string().nullable(),
-  executionState: executionStateSchema,
-  lastStopReason: stopReasonSchema,
   warnings: z.array(z.object({ code: z.string(), message: z.string() })),
 });
 

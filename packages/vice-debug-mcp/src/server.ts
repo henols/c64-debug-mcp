@@ -5,12 +5,11 @@ import { z } from 'zod';
 import {
   C64_REGISTER_DEFINITIONS,
   breakpointKindSchema,
+  emulatorStatusSchema,
   emulatorConfigSchema,
   executionStateSchema,
-  memSpaceSchema,
   resetModeSchema,
   responseMetaSchema,
-  sessionStatusSchema,
   stopReasonSchema,
 } from './contracts.js';
 import { ViceSession } from './session.js';
@@ -26,21 +25,13 @@ const address16Schema = z.number().int().min(0).max(0xffff);
 
 const breakpointSchema = z.object({
   id: z.number().int().describe('Breakpoint identifier'),
-  start: address16Schema.describe('Start address of the breakpoint range'),
-  end: address16Schema.describe('End address of the breakpoint range'),
-  memSpace: memSpaceSchema.describe('Target memory space'),
+  address: address16Schema.describe('Start address of the breakpoint range'),
+  length: z.number().int().positive().describe('Size of the breakpoint range in bytes'),
   enabled: z.boolean().describe('Whether the breakpoint is enabled'),
-  stopWhenHit: z.boolean().describe('Whether execution stops when the breakpoint is hit'),
-  hitCount: z.number().int().describe('Number of times the breakpoint has been hit'),
-  ignoreCount: z.number().int().describe('Number of hits to ignore before stopping'),
-  currentlyHit: z.boolean().describe('Whether the breakpoint is currently hit'),
   temporary: z.boolean().describe('Whether the breakpoint is temporary'),
   hasCondition: z.boolean().describe('Whether the breakpoint has a condition expression'),
   kind: breakpointKindSchema.describe('Breakpoint trigger kind'),
-});
-
-const labeledBreakpointSchema = breakpointSchema.extend({
-  label: z.string().nullable(),
+  label: z.string().nullable().optional().describe('Optional caller-provided label'),
 });
 
 const symbolSchema = z.object({
@@ -76,6 +67,12 @@ function buildC64PartialRegisterValueSchema() {
 
 const c64RegisterValueSchema = buildC64RegisterValueSchema();
 const c64PartialRegisterValueSchema = buildC64PartialRegisterValueSchema();
+const debugStateSchema = z.object({
+  executionState: executionStateSchema.describe('Current execution state of the emulator'),
+  lastStopReason: stopReasonSchema.describe('Reason the emulator most recently stopped in the monitor'),
+  programCounter: address16Schema.describe('Current program counter'),
+  registers: c64RegisterValueSchema,
+});
 
 function toolOutputSchema<T extends z.ZodTypeAny>(dataSchema: T) {
   return z.object({
@@ -116,13 +113,37 @@ function createViceTool<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAn
   });
 }
 
-const sessionStatusTool = createViceTool({
-  id: 'session_status',
-  description: 'Returns explicit VICE session, process, recovery, and execution state.',
-  dataSchema: sessionStatusSchema,
+function normalizeBreakpoint(
+  breakpoint: {
+    id: number;
+    start: number;
+    end: number;
+    enabled: boolean;
+    temporary: boolean;
+    hasCondition: boolean;
+    kind: z.infer<typeof breakpointKindSchema>;
+  },
+  label: string | null = null,
+) {
+  return {
+    id: breakpoint.id,
+    address: breakpoint.start,
+    length: breakpoint.end - breakpoint.start + 1,
+    enabled: breakpoint.enabled,
+    temporary: breakpoint.temporary,
+    hasCondition: breakpoint.hasCondition,
+    kind: breakpoint.kind,
+    label,
+  };
+}
+
+const getEmulatorStatusTool = createViceTool({
+  id: 'get_emulator_status',
+  description: 'Returns emulator configuration and readiness state without debugger details.',
+  dataSchema: emulatorStatusSchema,
   mcp: {
     annotations: {
-      title: 'Session Status',
+      title: 'Emulator Status',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -138,7 +159,7 @@ const setEmulatorConfigTool = createViceTool({
   inputSchema: emulatorConfigSchema,
   dataSchema: z.object({
     config: emulatorConfigSchema,
-    session: sessionStatusSchema,
+    session: emulatorStatusSchema,
   }),
   execute: async (input) => await viceSession.setEmulatorConfig(input),
 });
@@ -158,19 +179,16 @@ const resetConfigTool = createViceTool({
   dataSchema: z.object({
     cleared: z.boolean(),
     hadConfig: z.boolean(),
-    session: sessionStatusSchema,
+    session: emulatorStatusSchema,
   }),
   execute: async () => await viceSession.resetConfig(),
 });
 
-const getRegistersTool = createViceTool({
-  id: 'get_registers',
-  description: 'Returns C64 register values as a keyed object.',
-  dataSchema: z.object({
-    machine: z.string(),
-    registers: c64RegisterValueSchema,
-  }),
-  execute: async () => await viceSession.getRegisters(),
+const getDebugStateTool = createViceTool({
+  id: 'get_debug_state',
+  description: 'Returns the current debugger state with program counter and C64 registers.',
+  dataSchema: debugStateSchema,
+  execute: async () => await viceSession.getDebugState(),
 });
 
 const setRegistersTool = createViceTool({
@@ -187,7 +205,7 @@ const setRegistersTool = createViceTool({
 });
 
 const readMemoryTool = createViceTool({
-  id: 'read_memory',
+  id: 'memory_read',
   description: 'Reads an inclusive memory range and returns raw bytes as a JSON array.',
   inputSchema: z
     .object({
@@ -199,12 +217,14 @@ const readMemoryTool = createViceTool({
       path: ['length'],
     }),
   dataSchema: z.object({
+    address: address16Schema.describe('Start address of the returned memory chunk'),
     length: z.number().int().min(0).describe('Number of bytes returned'),
     data: z.array(z.number().int().min(0).max(255)).describe('Raw bytes returned from memory'),
   }),
   execute: async (input) => {
     const result = await viceSession.readMemory(input.address, input.address + input.length - 1);
     return {
+      address: input.address,
       length: result.length,
       data: result.data,
     };
@@ -212,7 +232,7 @@ const readMemoryTool = createViceTool({
 });
 
 const writeMemoryTool = createViceTool({
-  id: 'write_memory',
+  id: 'memory_write',
   description: 'Writes raw byte values into the active VICE memory space.',
   inputSchema: z
     .object({
@@ -225,83 +245,33 @@ const writeMemoryTool = createViceTool({
     }),
   dataSchema: z.object({
     worked: z.boolean().describe('Whether the write operation completed successfully'),
-  }),
-  execute: async (input) => {
-    await viceSession.writeMemory(input.address, input.data);
-    return {
-      worked: true,
-    };
-  },
-});
-
-
-const continueExecutionTool = createViceTool({
-  id: 'continue_execution',
-  description: 'Continues execution from the current monitor stop.',
-  dataSchema: z.object({
+    address: address16Schema.describe('Start address where the bytes were written'),
+    length: z.number().int().min(1).describe('Number of bytes written'),
     executionState: executionStateSchema,
     lastStopReason: stopReasonSchema,
-    warnings: z.array(warningSchema),
+    programCounter: address16Schema,
+    registers: c64RegisterValueSchema,
   }),
-  execute: async () => await viceSession.continueExecution(),
+  execute: async (input) => await viceSession.writeMemory(input.address, input.data),
 });
 
-const stepInstructionTool = createViceTool({
-  id: 'step_instruction',
-  description: 'Steps forward by one or more instructions.',
+const executeTool = createViceTool({
+  id: 'execute',
+  description: 'Controls execution with pause, resume, step, step_over, step_out, or reset.',
   inputSchema: z.object({
-    count: z.number().int().positive().default(1),
+    action: z.enum(['pause', 'resume', 'step', 'step_over', 'step_out', 'reset']),
+    count: z.number().int().positive().default(1).describe('Instruction count for step and step_over actions'),
+    resetMode: resetModeSchema.default('soft').describe('Reset mode when action is reset'),
   }),
   dataSchema: z.object({
     executionState: executionStateSchema,
     lastStopReason: stopReasonSchema,
-    programCounter: z.number().int().nullable(),
-    stepsExecuted: z.number().int(),
+    programCounter: address16Schema,
+    registers: c64RegisterValueSchema,
+    stepsExecuted: z.number().int().positive().optional(),
     warnings: z.array(warningSchema),
   }),
-  execute: async (input) => await viceSession.stepInstruction(input.count, false),
-});
-
-const stepOverTool = createViceTool({
-  id: 'step_over',
-  description: 'Steps over the current instruction or subroutine call.',
-  inputSchema: z.object({
-    count: z.number().int().positive().default(1),
-  }),
-  dataSchema: z.object({
-    executionState: executionStateSchema,
-    lastStopReason: stopReasonSchema,
-    programCounter: z.number().int().nullable(),
-    stepsExecuted: z.number().int(),
-    warnings: z.array(warningSchema),
-  }),
-  execute: async (input) => await viceSession.stepInstruction(input.count, true),
-});
-
-const stepOutTool = createViceTool({
-  id: 'step_out',
-  description: 'Runs until the current subroutine returns.',
-  dataSchema: z.object({
-    executionState: executionStateSchema,
-    lastStopReason: stopReasonSchema,
-    programCounter: z.number().int().nullable(),
-    warnings: z.array(warningSchema),
-  }),
-  execute: async () => await viceSession.stepOut(),
-});
-
-const resetMachineTool = createViceTool({
-  id: 'reset_machine',
-  description: 'Resets the machine.',
-  inputSchema: z.object({
-    mode: resetModeSchema.default('soft'),
-  }),
-  dataSchema: z.object({
-    executionState: executionStateSchema,
-    lastStopReason: stopReasonSchema,
-    warnings: z.array(warningSchema),
-  }),
-  execute: async (input) => await viceSession.resetMachine(input.mode ?? 'soft'),
+  execute: async (input) => await viceSession.execute(input.action, input.count, input.resetMode),
 });
 
 const listBreakpointsTool = createViceTool({
@@ -313,7 +283,12 @@ const listBreakpointsTool = createViceTool({
   dataSchema: z.object({
     breakpoints: z.array(breakpointSchema),
   }),
-  execute: async (input) => await viceSession.listBreakpoints(input.includeDisabled),
+  execute: async (input) => {
+    const result = await viceSession.listBreakpoints(input.includeDisabled);
+    return {
+      breakpoints: result.breakpoints.map((breakpoint) => normalizeBreakpoint(breakpoint)),
+    };
+  },
 });
 
 const getBreakpointTool = createViceTool({
@@ -325,115 +300,60 @@ const getBreakpointTool = createViceTool({
   dataSchema: z.object({
     breakpoint: breakpointSchema,
   }),
-  execute: async (input) => await viceSession.getBreakpoint(input.breakpointId),
+  execute: async (input) => {
+    const result = await viceSession.getBreakpoint(input.breakpointId);
+    return {
+      breakpoint: normalizeBreakpoint(result.breakpoint),
+    };
+  },
 });
 
-const setBreakpointTool = createViceTool({
-  id: 'set_breakpoint',
-  description: 'Creates an execution or memory-access breakpoint.',
+const breakpointSetTool = createViceTool({
+  id: 'breakpoint_set',
+  description: 'Creates an execution breakpoint or read/write watchpoint.',
   inputSchema: z.object({
     kind: breakpointKindSchema,
-    start: address16Schema.describe('Start address of the breakpoint range'),
-    end: address16Schema.optional().describe('Optional end address of the breakpoint range'),
-    memSpace: memSpaceSchema.default('main'),
+    address: address16Schema.describe('Start address of the breakpoint range'),
+    length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes'),
     condition: z.string().optional(),
     label: z.string().optional(),
     temporary: z.boolean().default(false),
     enabled: z.boolean().default(true),
   }),
   dataSchema: z.object({
-    breakpoint: labeledBreakpointSchema,
+    breakpoint: breakpointSchema,
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
+    programCounter: address16Schema,
+    registers: c64RegisterValueSchema,
   }),
-  execute: async (input) =>
-    await viceSession.setBreakpoint({
-      kind: input.kind,
-      start: input.start,
-      end: input.end,
-      memSpace: input.memSpace,
-      condition: input.condition,
-      label: input.label,
-      temporary: input.temporary,
-      enabled: input.enabled,
-    }),
+  execute: async (input) => {
+    const result = await viceSession.breakpointSet(input);
+    return {
+      breakpoint: normalizeBreakpoint(result.breakpoint, result.breakpoint.label ?? null),
+      executionState: result.executionState,
+      lastStopReason: result.lastStopReason,
+      programCounter: result.programCounter,
+      registers: result.registers,
+    };
+  },
 });
 
-const deleteBreakpointTool = createViceTool({
-  id: 'delete_breakpoint',
+const breakpointClearTool = createViceTool({
+  id: 'breakpoint_clear',
   description: 'Deletes a breakpoint by numeric id.',
   inputSchema: z.object({
     breakpointId: z.number().int().nonnegative(),
   }),
   dataSchema: z.object({
-    deleted: z.boolean(),
+    cleared: z.boolean(),
     breakpointId: z.number().int(),
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
+    programCounter: address16Schema,
+    registers: c64RegisterValueSchema,
   }),
-  execute: async (input) => await viceSession.deleteBreakpoint(input.breakpointId),
-});
-
-const enableBreakpointTool = createViceTool({
-  id: 'enable_breakpoint',
-  description: 'Enables a breakpoint by id.',
-  inputSchema: z.object({
-    breakpointId: z.number().int().nonnegative(),
-  }),
-  dataSchema: z.object({
-    breakpointId: z.number().int(),
-    enabled: z.boolean(),
-  }),
-  execute: async (input) => await viceSession.enableBreakpoint(input.breakpointId, true),
-});
-
-const disableBreakpointTool = createViceTool({
-  id: 'disable_breakpoint',
-  description: 'Disables a breakpoint by id.',
-  inputSchema: z.object({
-    breakpointId: z.number().int().nonnegative(),
-  }),
-  dataSchema: z.object({
-    breakpointId: z.number().int(),
-    enabled: z.boolean(),
-  }),
-  execute: async (input) => await viceSession.enableBreakpoint(input.breakpointId, false),
-});
-
-const setWatchpointTool = createViceTool({
-  id: 'set_watchpoint',
-  description: 'Creates a read/write watchpoint.',
-  inputSchema: z.object({
-    start: address16Schema.describe('Start address of the watchpoint range'),
-    end: address16Schema.optional().describe('Optional end address of the watchpoint range'),
-    accessKind: z.enum(['read', 'write', 'read_write']),
-    memSpace: memSpaceSchema.default('main'),
-    condition: z.string().optional(),
-    label: z.string().optional(),
-  }),
-  dataSchema: z.object({
-    breakpoint: labeledBreakpointSchema,
-  }),
-  execute: async (input) =>
-    await viceSession.setWatchpoint(
-      input.start,
-      input.end,
-      input.accessKind,
-      input.condition,
-      input.label,
-      input.memSpace,
-    ),
-});
-
-const setBreakpointConditionTool = createViceTool({
-  id: 'set_breakpoint_condition',
-  description: 'Sets a write-only condition string on an existing breakpoint.',
-  inputSchema: z.object({
-    breakpointId: z.number().int().nonnegative(),
-    condition: z.string().min(1),
-  }),
-  dataSchema: z.object({
-    breakpointId: z.number().int(),
-    hasCondition: z.boolean(),
-    conditionTrackedByServer: z.boolean(),
-  }),
-  execute: async (input) => await viceSession.setBreakpointCondition(input.breakpointId, input.condition),
+  execute: async (input) => await viceSession.breakpointClear(input.breakpointId),
 });
 
 const loadProgramTool = createViceTool({
@@ -514,21 +434,6 @@ const lookupSymbolTool = createViceTool({
   execute: async (input) => viceSession.lookupSymbol(input.name),
 });
 
-const setBreakpointAtSymbolTool = createViceTool({
-  id: 'set_breakpoint_at_symbol',
-  description: 'Resolves a loaded symbol and creates an execution breakpoint at that address.',
-  inputSchema: z.object({
-    name: z.string(),
-    condition: z.string().optional(),
-    temporary: z.boolean().default(false),
-  }),
-  dataSchema: z.object({
-    symbol: symbolSchema,
-    breakpoint: labeledBreakpointSchema,
-  }),
-  execute: async (input) => await viceSession.setBreakpointAtSymbol(input.name, input.condition, input.temporary),
-});
-
 const captureDisplayTool = createViceTool({
   id: 'capture_display',
   description: 'Captures the current display and returns indexed pixel data plus a grayscale PNG fallback.',
@@ -596,33 +501,24 @@ export const viceDebugServer = new MCPServer({
   instructions:
     'Set emulator config first. After that, use debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
   tools: {
-    session_status: sessionStatusTool,
+    get_emulator_status: getEmulatorStatusTool,
     set_emulator_config: setEmulatorConfigTool,
     get_emulator_config: getEmulatorConfigTool,
     reset_config: resetConfigTool,
-    get_registers: getRegistersTool,
+    get_debug_state: getDebugStateTool,
     set_registers: setRegistersTool,
-    read_memory: readMemoryTool,
-    write_memory: writeMemoryTool,
-    continue_execution: continueExecutionTool,
-    step_instruction: stepInstructionTool,
-    step_over: stepOverTool,
-    step_out: stepOutTool,
-    reset_machine: resetMachineTool,
+    memory_read: readMemoryTool,
+    memory_write: writeMemoryTool,
+    execute: executeTool,
     list_breakpoints: listBreakpointsTool,
     get_breakpoint: getBreakpointTool,
-    set_breakpoint: setBreakpointTool,
-    delete_breakpoint: deleteBreakpointTool,
-    enable_breakpoint: enableBreakpointTool,
-    disable_breakpoint: disableBreakpointTool,
-    set_watchpoint: setWatchpointTool,
-    set_breakpoint_condition: setBreakpointConditionTool,
+    breakpoint_set: breakpointSetTool,
+    breakpoint_clear: breakpointClearTool,
     load_program: loadProgramTool,
     autostart_program: autostartProgramTool,
     load_symbols: loadSymbolsTool,
     list_symbol_sources: listSymbolSourcesTool,
     lookup_symbol: lookupSymbolTool,
-    set_breakpoint_at_symbol: setBreakpointAtSymbolTool,
     capture_display: captureDisplayTool,
     get_banks: getBanksTool,
     get_info: getInfoTool,

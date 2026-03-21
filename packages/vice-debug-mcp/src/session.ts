@@ -239,6 +239,12 @@ export async function isPortAvailable(host: string, port: number): Promise<boole
 type LaunchMode = 'initial' | 'config_update' | 'restart';
 type C64RegisterValues = Record<C64RegisterName, number>;
 type C64RegisterMetadata = Record<C64RegisterName, { widthBits: 8 | 16; min: number; max: number; description: string }>;
+type DebugState = {
+  executionState: SessionState['executionState'];
+  lastStopReason: StopReason;
+  programCounter: number;
+  registers: C64RegisterValues;
+};
 
 export class ViceSession {
   readonly #client = new ViceMonitorClient();
@@ -259,6 +265,7 @@ export class ViceSession {
   #process: ChildProcessWithoutNullStreams | null = null;
   #warnings: WarningItem[] = [];
   #lastExecutionIntent: StopReason = 'unknown';
+  #lastRegisters: C64RegisterValues | null = null;
   #config: EmulatorConfig | null = null;
   #recoveryInProgress = false;
   #recoveryPromise: Promise<void> | null = null;
@@ -356,10 +363,14 @@ export class ViceSession {
       configured,
       status,
       machineType: this.#machineType,
-      executionState: this.#executionState,
-      lastStopReason: this.#lastStopReason,
       warnings: [...this.#warnings],
     };
+  }
+
+  async getDebugState(): Promise<DebugState> {
+    await this.#ensureReady();
+    this.#lastExecutionIntent = this.#executionState === 'running' ? 'manual_break' : this.#lastStopReason;
+    return await this.#readDebugState();
   }
 
   getEmulatorConfig(): { config: EmulatorConfig | null } {
@@ -427,13 +438,32 @@ export class ViceSession {
 
   async getRegisters() {
     await this.#ensureReady();
-    const metadata = await this.#client.getRegistersAvailable();
-    const values = await this.#client.getRegisters();
+    const registers = await this.#readRegisters();
 
     return {
       machine: this.#machineType ?? 'unknown',
-      registers: this.#mapC64Registers(metadata.registers, values.registers),
+      registers,
     };
+  }
+
+  async execute(action: 'pause' | 'resume' | 'step' | 'step_over' | 'step_out' | 'reset', count = 1, resetMode: 'soft' | 'hard' = 'soft') {
+    switch (action) {
+      case 'pause':
+        return {
+          ...(await this.getDebugState()),
+          warnings: [] as WarningItem[],
+        };
+      case 'resume':
+        return await this.continueExecution();
+      case 'step':
+        return await this.stepInstruction(count, false);
+      case 'step_over':
+        return await this.stepInstruction(count, true);
+      case 'step_out':
+        return await this.stepOut();
+      case 'reset':
+        return await this.resetMachine(resetMode);
+    }
   }
 
   async getRegisterMetadata() {
@@ -481,6 +511,22 @@ export class ViceSession {
     const response = await this.#client.setRegisters(payload);
     this.#applyResumePolicy(true);
     const updatedById = new Map(response.registers.map((register) => [register.id, register.value]));
+    this.#lastRegisters = this.#mergeRegisters(
+      this.#lastRegisters,
+      Object.fromEntries(
+        C64_REGISTER_DEFINITIONS.flatMap((definition) => {
+          const meta = metadataByName.get(definition.viceName.toUpperCase());
+          if (!meta) {
+            return [];
+          }
+          const value = updatedById.get(meta.id);
+          if (value == null) {
+            return [];
+          }
+          return [[definition.fieldName, value]];
+        }),
+      ) as Partial<Record<C64RegisterName, number>>,
+    );
     return {
       updated: Object.fromEntries(
         C64_REGISTER_DEFINITIONS.flatMap((definition) => {
@@ -519,10 +565,16 @@ export class ViceSession {
       validationError('write_memory data must contain only integer byte values between 0 and 255');
     }
     await this.#client.writeMemory(start, bytes, memSpace, bank);
+    const debugState = await this.#readDebugState();
     this.#applyResumePolicy(true);
     return {
+      address: start,
       length: bytes.length,
-      written: true,
+      worked: true,
+      executionState: this.#resumePolicy === 'preserve_pause_state' ? debugState.executionState : 'running',
+      lastStopReason: this.#resumePolicy === 'preserve_pause_state' ? debugState.lastStopReason : 'none',
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
     };
   }
 
@@ -638,6 +690,7 @@ export class ViceSession {
 
   async continueExecution() {
     await this.#ensureReady();
+    const debugState = this.#lastRegisters ? this.#buildDebugState(this.#lastRegisters) : await this.#readDebugState();
     this.#lastExecutionIntent = 'unknown';
     await this.#client.continueExecution();
     this.#executionState = 'running';
@@ -645,6 +698,8 @@ export class ViceSession {
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
       warnings: [] as WarningItem[],
     };
   }
@@ -655,12 +710,12 @@ export class ViceSession {
     await this.#client.stepInstruction(count, stepOver);
     this.#executionState = 'stopped_in_monitor';
     this.#lastStopReason = 'step_complete';
-    const registers = await this.getRegisters();
-    const programCounter = registers.registers.PC ?? null;
+    const debugState = await this.#readDebugState();
     return {
-      executionState: this.#executionState,
-      lastStopReason: this.#lastStopReason,
-      programCounter,
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
       stepsExecuted: count,
       warnings: [] as WarningItem[],
     };
@@ -672,12 +727,12 @@ export class ViceSession {
     await this.#client.stepOut();
     this.#executionState = 'stopped_in_monitor';
     this.#lastStopReason = 'step_complete';
-    const registers = await this.getRegisters();
-    const programCounter = registers.registers.PC ?? null;
+    const debugState = await this.#readDebugState();
     return {
-      executionState: this.#executionState,
-      lastStopReason: this.#lastStopReason,
-      programCounter,
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
       warnings: [] as WarningItem[],
     };
   }
@@ -688,9 +743,12 @@ export class ViceSession {
     await this.#client.reset(mode);
     this.#executionState = 'stopped_in_monitor';
     this.#lastStopReason = 'reset';
+    const debugState = await this.#readDebugState();
     return {
-      executionState: this.#executionState,
-      lastStopReason: this.#lastStopReason,
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
       warnings: [] as WarningItem[],
     };
   }
@@ -732,20 +790,30 @@ export class ViceSession {
       enabled: options.enabled,
       stopWhenHit: true,
     });
+    const debugState = await this.#readDebugState();
     return {
       breakpoint: {
         ...response.checkpoint,
         label: options.label ?? null,
       },
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
     };
   }
 
   async deleteBreakpoint(breakpointId: number) {
     await this.#ensureReady();
     await this.#client.deleteBreakpoint(breakpointId);
+    const debugState = await this.#readDebugState();
     return {
-      deleted: true,
+      cleared: true,
       breakpointId,
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
     };
   }
 
@@ -784,6 +852,36 @@ export class ViceSession {
       label,
       memSpace,
     });
+  }
+
+  async breakpointSet(options: {
+    kind: BreakpointKind;
+    address: number;
+    length?: number;
+    condition?: string;
+    label?: string;
+    temporary?: boolean;
+    enabled?: boolean;
+  }) {
+    const length = options.length ?? 1;
+    if (!Number.isInteger(length) || length <= 0) {
+      validationError('Breakpoint length must be a positive integer', { length });
+    }
+    const end = options.address + length - 1;
+    this.#validateRange(options.address, end);
+    return await this.setBreakpoint({
+      kind: options.kind,
+      start: options.address,
+      end,
+      condition: options.condition,
+      label: options.label,
+      temporary: options.temporary,
+      enabled: options.enabled,
+    });
+  }
+
+  async breakpointClear(breakpointId: number) {
+    return await this.deleteBreakpoint(breakpointId);
   }
 
   async loadProgram(filePath: string, addressOverride?: number | null) {
@@ -1131,8 +1229,8 @@ export class ViceSession {
 
   async #hydrateExecutionState(): Promise<void> {
     try {
-      const registers = await this.#client.getRegisters();
-      if (registers.registers.length > 0) {
+      const registers = await this.#readRegisters();
+      if (Object.keys(registers).length > 0) {
         this.#executionState = 'stopped_in_monitor';
         this.#lastStopReason = 'monitor_entry';
         return;
@@ -1142,6 +1240,44 @@ export class ViceSession {
     }
 
     this.#executionState = 'unknown';
+  }
+
+  async #readRegisters(): Promise<C64RegisterValues> {
+    const metadata = await this.#client.getRegistersAvailable();
+    const values = await this.#client.getRegisters();
+    const registers = this.#mapC64Registers(metadata.registers, values.registers);
+    this.#lastRegisters = registers;
+    return registers;
+  }
+
+  async #readDebugState(): Promise<DebugState> {
+    const registers = await this.#readRegisters();
+    this.#executionState = 'stopped_in_monitor';
+    return this.#buildDebugState(registers);
+  }
+
+  #buildDebugState(registers: C64RegisterValues): DebugState {
+    this.#lastRegisters = registers;
+    return {
+      executionState: this.#executionState,
+      lastStopReason: this.#lastStopReason,
+      programCounter: registers.PC,
+      registers,
+    };
+  }
+
+  #mergeRegisters(
+    current: C64RegisterValues | null,
+    updated: Partial<Record<C64RegisterName, number>>,
+  ): C64RegisterValues | null {
+    if (!current) {
+      return null;
+    }
+
+    return {
+      ...current,
+      ...updated,
+    };
   }
 
   #applyResumePolicy(mutating: boolean): void {
