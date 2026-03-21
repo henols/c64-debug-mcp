@@ -6,10 +6,12 @@ import {
   C64_REGISTER_DEFINITIONS,
   breakpointKindSchema,
   emulatorConfigSchema,
+  executionStateSchema,
   memSpaceSchema,
   resetModeSchema,
   responseMetaSchema,
   sessionStatusSchema,
+  stopReasonSchema,
 } from './contracts.js';
 import { parseHexLike } from './contracts.js';
 import { ViceSession } from './session.js';
@@ -148,7 +150,7 @@ const sessionStatusTool = createViceTool({
       openWorldHint: false,
     },
   },
-  execute: async () => viceSession.snapshot(),
+  execute: async () => viceSession.status(),
 });
 
 const setEmulatorConfigTool = createViceTool({
@@ -200,7 +202,7 @@ const setRegistersTool = createViceTool({
   }),
   dataSchema: z.object({
     updated: c64PartialRegisterValueSchema,
-    executionState: z.string(),
+    executionState: executionStateSchema,
   }),
   execute: async (input) => await viceSession.setRegisters(input.registers),
 });
@@ -258,8 +260,8 @@ const continueExecutionTool = createViceTool({
   id: 'continue_execution',
   description: 'Continues execution from the current monitor stop.',
   dataSchema: z.object({
-    executionState: z.string(),
-    lastStopReason: z.string(),
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
     warnings: z.array(warningSchema),
   }),
   execute: async () => await viceSession.continueExecution(),
@@ -272,8 +274,8 @@ const stepInstructionTool = createViceTool({
     count: z.number().int().positive().default(1),
   }),
   dataSchema: z.object({
-    executionState: z.string(),
-    lastStopReason: z.string(),
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
     programCounter: z.number().int().nullable(),
     programCounterHex: z.string().nullable(),
     stepsExecuted: z.number().int(),
@@ -289,8 +291,8 @@ const stepOverTool = createViceTool({
     count: z.number().int().positive().default(1),
   }),
   dataSchema: z.object({
-    executionState: z.string(),
-    lastStopReason: z.string(),
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
     programCounter: z.number().int().nullable(),
     programCounterHex: z.string().nullable(),
     stepsExecuted: z.number().int(),
@@ -303,8 +305,8 @@ const stepOutTool = createViceTool({
   id: 'step_out',
   description: 'Runs until the current subroutine returns.',
   dataSchema: z.object({
-    executionState: z.string(),
-    lastStopReason: z.string(),
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
     programCounter: z.number().int().nullable(),
     programCounterHex: z.string().nullable(),
     warnings: z.array(warningSchema),
@@ -319,8 +321,8 @@ const resetMachineTool = createViceTool({
     mode: resetModeSchema.default('soft'),
   }),
   dataSchema: z.object({
-    executionState: z.string(),
-    lastStopReason: z.string(),
+    executionState: executionStateSchema,
+    lastStopReason: stopReasonSchema,
     warnings: z.array(warningSchema),
   }),
   execute: async (input) => await viceSession.resetMachine(input.mode ?? 'soft'),
@@ -487,7 +489,7 @@ const autostartProgramTool = createViceTool({
     filePath: z.string(),
     runAfterLoading: z.boolean(),
     fileIndex: z.number().int(),
-    executionState: z.string(),
+    executionState: executionStateSchema,
   }),
   execute: async (input) => await viceSession.autostartProgram(input.filePath, input.runAfterLoading, input.fileIndex),
 });

@@ -14,6 +14,7 @@ import {
   defaultMachineProfile,
   emulatorConfigSchema,
   normalizeHex,
+  type SessionHealth,
   type C64RegisterName,
   type BreakpointKind,
   type EmulatorConfig,
@@ -21,6 +22,7 @@ import {
   type ResponseMeta,
   type ResumePolicy,
   type SessionState,
+  type SessionStatus,
   type StopReason,
   type WarningItem,
 } from './contracts.js';
@@ -333,13 +335,41 @@ export class ViceSession {
     };
   }
 
+  status(): SessionStatus {
+    const configured = this.#config != null;
+    let status: SessionHealth;
+
+    if (!configured) {
+      status = 'not_configured';
+    } else if (this.#recoveryInProgress || this.#transportState === 'reconnecting') {
+      status = 'recovering';
+    } else if (this.#transportState === 'starting' || this.#transportState === 'waiting_for_monitor' || this.#processState === 'launching') {
+      status = 'starting';
+    } else if (this.#transportState === 'connected' && this.#processState === 'running') {
+      status = 'ready';
+    } else if (this.#transportState === 'faulted' || this.#processState === 'crashed') {
+      status = 'error';
+    } else {
+      status = 'stopped';
+    }
+
+    return {
+      configured,
+      status,
+      machineType: this.#machineType,
+      executionState: this.#executionState,
+      lastStopReason: this.#lastStopReason,
+      warnings: [...this.#warnings],
+    };
+  }
+
   getEmulatorConfig(): { config: EmulatorConfig | null } {
     return {
       config: this.#config ? { ...this.#config } : defaultEmulatorConfig(),
     };
   }
 
-  async setEmulatorConfig(config: EmulatorConfig): Promise<{ config: EmulatorConfig; session: SessionState }> {
+  async setEmulatorConfig(config: EmulatorConfig): Promise<{ config: EmulatorConfig; session: SessionStatus }> {
     const nextConfig = normalizeConfig(config);
 
     if (!this.#sessionId) {
@@ -354,11 +384,11 @@ export class ViceSession {
 
     return {
       config: { ...nextConfig },
-      session: this.snapshot(),
+      session: this.status(),
     };
   }
 
-  async resetConfig(): Promise<{ cleared: boolean; hadConfig: boolean; session: SessionState }> {
+  async resetConfig(): Promise<{ cleared: boolean; hadConfig: boolean; session: SessionStatus }> {
     const hadConfig = this.#config != null;
 
     this.#config = null;
@@ -382,7 +412,7 @@ export class ViceSession {
     return {
       cleared: true,
       hadConfig,
-      session: this.snapshot(),
+      session: this.status(),
     };
   }
 

@@ -36,6 +36,7 @@ export const stopReasonSchema = z.enum([
   'error',
   'unknown',
 ]);
+export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready', 'recovering', 'stopped', 'error']);
 export const resumePolicySchema = z.enum(['preserve_pause_state', 'resume_after_mutation', 'always_resume']);
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
@@ -58,6 +59,7 @@ export type EmulatorOwnership = z.infer<typeof emulatorOwnershipSchema>;
 export type ProcessState = z.infer<typeof processStateSchema>;
 export type ExecutionState = z.infer<typeof executionStateSchema>;
 export type StopReason = z.infer<typeof stopReasonSchema>;
+export type SessionHealth = z.infer<typeof sessionHealthSchema>;
 export type ResumePolicy = z.infer<typeof resumePolicySchema>;
 export type BreakpointKind = z.infer<typeof breakpointKindSchema>;
 export type ResetMode = z.infer<typeof resetModeSchema>;
@@ -120,6 +122,15 @@ export interface SessionState {
   connectedSince: string | null;
   lastResponseAt: string | null;
   processId: number | null;
+  warnings: WarningItem[];
+}
+
+export interface SessionStatus {
+  configured: boolean;
+  status: SessionHealth;
+  machineType: string | null;
+  executionState: ExecutionState;
+  lastStopReason: StopReason;
   warnings: WarningItem[];
 }
 
@@ -189,36 +200,11 @@ export interface SymbolSource {
 }
 
 export const sessionStatusSchema = z.object({
-  sessionId: z.string().nullable(),
-  transportState: transportStateSchema,
-  emulatorOwnership: emulatorOwnershipSchema,
-  processState: processStateSchema,
+  configured: z.boolean(),
+  status: sessionHealthSchema,
+  machineType: z.string().nullable(),
   executionState: executionStateSchema,
   lastStopReason: stopReasonSchema,
-  machineType: z.string().nullable(),
-  machineProfile: z
-    .object({
-      machineType: z.string(),
-      cpu: z.string(),
-      registerNamespace: z.string(),
-    })
-    .nullable(),
-  binaryMonitorEndpoint: z.object({
-    host: z.string().nullable(),
-    port: z.number().int().nullable(),
-  }),
-  activePolicies: z.object({
-    resumePolicy: resumePolicySchema,
-  }),
-  configPresent: z.boolean(),
-  managedByServer: z.boolean(),
-  recoveryInProgress: z.boolean(),
-  launchId: z.number().int().nonnegative(),
-  restartCount: z.number().int().nonnegative(),
-  freshEmulatorPending: z.boolean(),
-  connectedSince: z.string().nullable(),
-  lastResponseAt: z.string().nullable(),
-  processId: z.number().int().nullable(),
   warnings: z.array(z.object({ code: z.string(), message: z.string() })),
 });
 
