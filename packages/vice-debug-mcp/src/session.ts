@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import zlib from 'node:zlib';
@@ -14,14 +15,18 @@ import {
   type C64RegisterName,
   type BreakpointKind,
   type EmulatorConfig,
+  type InputAction,
+  type JoystickControl,
+  type JoystickPort,
   type MemSpaceName,
+  type ProgramLoadMode,
   type ResponseMeta,
   type SessionState,
   type SessionStatus,
   type StopReason,
   type WarningItem,
 } from './contracts.js';
-import { ViceMcpError, debuggerNotPausedError, validationError } from './errors.js';
+import { ViceMcpError, debuggerNotPausedError, unsupportedError, validationError } from './errors.js';
 import { ViceMonitorClient } from './vice-protocol.js';
 
 function sleep(ms: number): Promise<void> {
@@ -60,12 +65,69 @@ function defaultEmulatorConfig(): EmulatorConfig {
 }
 
 function normalizeConfig(config: EmulatorConfig): EmulatorConfig {
+  const trimmedArguments = config.arguments?.trim() || undefined;
+  validateManagedLaunchArguments(trimmedArguments);
+
   return emulatorConfigSchema.parse({
     emulatorType: config.emulatorType ?? DEFAULT_MACHINE_TYPE,
     binaryPath: config.binaryPath?.trim() || undefined,
     workingDirectory: config.workingDirectory?.trim() || undefined,
-    arguments: config.arguments?.trim() || undefined,
+    arguments: trimmedArguments,
   });
+}
+
+function validateManagedLaunchArguments(argumentsString: string | undefined): void {
+  if (!argumentsString) {
+    return;
+  }
+
+  const args = splitCommandLine(argumentsString);
+  if (args.includes('-console')) {
+    validationError('Managed emulator sessions must run with a graphical VICE window. Headless console mode is not allowed.', {
+      argument: '-console',
+    });
+  }
+}
+
+async function buildViceLaunchEnv(): Promise<NodeJS.ProcessEnv> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const uid = os.userInfo().uid;
+  const runtimeDir = env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+
+  env.XDG_RUNTIME_DIR ||= runtimeDir;
+
+  if (!env.WAYLAND_DISPLAY) {
+    const waylandDisplay = await firstRuntimeEntry(runtimeDir, /^wayland-\d+$/);
+    if (waylandDisplay) {
+      env.WAYLAND_DISPLAY = waylandDisplay;
+    }
+  }
+
+  if (!env.XAUTHORITY) {
+    const xauthority = await firstRuntimeEntry(runtimeDir, /^\.mutter-Xwaylandauth\./, true);
+    if (xauthority) {
+      env.XAUTHORITY = xauthority;
+    }
+  }
+
+  if (!env.DISPLAY) {
+    env.DISPLAY = ':0';
+  }
+
+  return env;
+}
+
+async function firstRuntimeEntry(runtimeDir: string, pattern: RegExp, returnAbsolutePath = false): Promise<string | null> {
+  try {
+    const entries = await fs.readdir(runtimeDir);
+    const match = entries.find((entry) => pattern.test(entry));
+    if (!match) {
+      return null;
+    }
+    return returnAbsolutePath ? path.join(runtimeDir, match) : match;
+  } catch {
+    return null;
+  }
 }
 
 function encodePngGrayscale(width: number, height: number, pixels: Uint8Array): string {
@@ -150,6 +212,58 @@ function encodePetscii(text: string): Uint8Array {
   }
 
   return Uint8Array.from(bytes);
+}
+
+const JOYSTICK_CONTROL_BITS: Record<JoystickControl, number> = {
+  up: 0x01,
+  down: 0x02,
+  left: 0x04,
+  right: 0x08,
+  fire: 0x10,
+};
+
+const JOYSTICK_RELEASED_MASK = 0x1f;
+const DEFAULT_INPUT_TAP_MS = 75;
+const DEFAULT_KEYBOARD_REPEAT_MS = 100;
+
+function normalizeKeyboardKey(key: string): string {
+  const trimmed = key.trim();
+  if (!trimmed) {
+    validationError('keyboard_input requires a non-empty key name');
+  }
+
+  const symbolic = trimmed.toUpperCase();
+  switch (symbolic) {
+    case 'SPACE':
+      return ' ';
+    case 'ENTER':
+    case 'RETURN':
+      return '\n';
+    case 'TAB':
+      return ' ';
+    default:
+      if (trimmed.length === 1) {
+        return trimmed;
+      }
+      unsupportedError(
+        'keyboard_input supports single ASCII characters plus the symbolic keys SPACE, ENTER, RETURN, and TAB.',
+        { key: trimmed },
+      );
+  }
+}
+
+function clampTapDuration(durationMs: number | undefined): number {
+  if (durationMs == null) {
+    return DEFAULT_INPUT_TAP_MS;
+  }
+  if (!Number.isInteger(durationMs) || durationMs <= 0) {
+    validationError('durationMs must be a positive integer', { durationMs });
+  }
+  return durationMs;
+}
+
+function joystickPortToProtocol(port: JoystickPort): number {
+  return port - 1;
 }
 
 export class PortAllocator {
@@ -263,6 +377,8 @@ export class ViceSession {
   #restartCount = 0;
   #suppressRecovery = false;
   #shuttingDown = false;
+  #heldKeyboardIntervals = new Map<string, NodeJS.Timeout>();
+  #heldJoystickMasks = new Map<JoystickPort, number>();
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
@@ -380,6 +496,7 @@ export class ViceSession {
     this.#lastStopReason = 'none';
     this.#executionState = 'unknown';
     this.#warnings = [];
+    this.#clearHeldInputState();
 
     await this.#stopManagedProcess(true);
 
@@ -404,6 +521,7 @@ export class ViceSession {
     this.#recoveryPromise = null;
     this.#recoveryInProgress = false;
     this.#freshEmulatorPending = false;
+    this.#clearHeldInputState();
 
     try {
       await this.#stopManagedProcess(true);
@@ -722,13 +840,49 @@ export class ViceSession {
     }
 
     const loadAddress = addressOverride ?? contents.readUInt16LE(0);
-    const bytes = addressOverride == null ? contents.subarray(2) : contents;
+    const bytes = contents.subarray(2);
     await this.#client.writeMemory(loadAddress, bytes);
     return {
       filePath: absolutePath,
       start: loadAddress,
       length: bytes.length,
       written: true,
+    };
+  }
+
+  async programLoad(options: {
+    filePath: string;
+    mode: ProgramLoadMode;
+    address?: number | null;
+    runAfterLoading?: boolean;
+    fileIndex?: number;
+  }) {
+    const filePath = path.resolve(options.filePath);
+
+    if (options.mode === 'memory') {
+      const result = await this.loadProgram(filePath, options.address ?? null);
+      return {
+        filePath: result.filePath,
+        mode: options.mode,
+        start: result.start,
+        length: result.length,
+        written: result.written,
+        runAfterLoading: null,
+        fileIndex: null,
+        executionState: null,
+      };
+    }
+
+    const result = await this.autostartProgram(filePath, options.runAfterLoading ?? true, options.fileIndex ?? 0);
+    return {
+      filePath: result.filePath,
+      mode: options.mode,
+      start: null,
+      length: null,
+      written: null,
+      runAfterLoading: result.runAfterLoading,
+      fileIndex: result.fileIndex,
+      executionState: result.executionState,
     };
   }
 
@@ -803,6 +957,89 @@ export class ViceSession {
     return {
       sent: true,
       length: encoded.length,
+    };
+  }
+
+  async keyboardInput(action: InputAction, key: string, durationMs?: number) {
+    await this.#ensureReady();
+    const text = normalizeKeyboardKey(key);
+    const heldKey = key.trim().toUpperCase();
+
+    switch (action) {
+      case 'tap': {
+        const duration = clampTapDuration(durationMs);
+        await this.sendKeys(text);
+        await sleep(duration);
+        return {
+          action,
+          key: heldKey,
+          applied: true,
+          held: false,
+          mode: 'buffered_text' as const,
+        };
+      }
+      case 'press': {
+        if (!this.#heldKeyboardIntervals.has(heldKey)) {
+          await this.sendKeys(text);
+          const interval = setInterval(() => {
+            void this.#client.sendKeys(Buffer.from(encodePetscii(text)).toString('binary')).catch(() => undefined);
+          }, DEFAULT_KEYBOARD_REPEAT_MS);
+          this.#heldKeyboardIntervals.set(heldKey, interval);
+        }
+        return {
+          action,
+          key: heldKey,
+          applied: true,
+          held: true,
+          mode: 'buffered_text_repeat' as const,
+        };
+      }
+      case 'release': {
+        const interval = this.#heldKeyboardIntervals.get(heldKey);
+        if (interval) {
+          clearInterval(interval);
+          this.#heldKeyboardIntervals.delete(heldKey);
+        }
+        return {
+          action,
+          key: heldKey,
+          applied: true,
+          held: false,
+          mode: 'buffered_text_repeat' as const,
+        };
+      }
+    }
+  }
+
+  async joystickInput(port: JoystickPort, action: InputAction, control: JoystickControl, durationMs?: number) {
+    await this.#ensureReady();
+    const bit = JOYSTICK_CONTROL_BITS[control];
+    if (bit == null) {
+      validationError('Unsupported joystick control', { control });
+    }
+
+    switch (action) {
+      case 'tap': {
+        const duration = clampTapDuration(durationMs);
+        await this.#applyJoystickMask(port, this.#getJoystickMask(port) & ~bit);
+        await sleep(duration);
+        await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
+        break;
+      }
+      case 'press':
+        await this.#applyJoystickMask(port, this.#getJoystickMask(port) & ~bit);
+        break;
+      case 'release':
+        await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
+        break;
+    }
+
+    return {
+      port,
+      action,
+      control,
+      applied: true,
+      state: this.#describeJoystickState(port),
     };
   }
 
@@ -893,8 +1130,11 @@ export class ViceSession {
     this.#connectedSince = null;
     this.#executionState = 'unknown';
 
+    const env = await buildViceLaunchEnv();
+
     const child = spawn(binary, args, {
       cwd: config.workingDirectory ? path.resolve(config.workingDirectory) : undefined,
+      env,
       stdio: 'pipe',
     });
     this.#process = child;
@@ -969,6 +1209,7 @@ export class ViceSession {
   async #stopManagedProcess(fullReset: boolean): Promise<void> {
     this.#suppressRecovery = true;
     try {
+      this.#clearHeldInputState();
       const processId = this.#process?.pid ?? null;
 
       if (this.#client.connected) {
@@ -1116,6 +1357,35 @@ export class ViceSession {
         return [definition.fieldName, value];
       }),
     ) as C64RegisterValues;
+  }
+
+  #getJoystickMask(port: JoystickPort): number {
+    return this.#heldJoystickMasks.get(port) ?? JOYSTICK_RELEASED_MASK;
+  }
+
+  async #applyJoystickMask(port: JoystickPort, mask: number): Promise<void> {
+    const normalizedMask = mask & JOYSTICK_RELEASED_MASK;
+    this.#heldJoystickMasks.set(port, normalizedMask);
+    await this.#client.setJoyport(joystickPortToProtocol(port), normalizedMask);
+  }
+
+  #describeJoystickState(port: JoystickPort) {
+    const mask = this.#getJoystickMask(port);
+    return {
+      up: (mask & JOYSTICK_CONTROL_BITS.up) === 0,
+      down: (mask & JOYSTICK_CONTROL_BITS.down) === 0,
+      left: (mask & JOYSTICK_CONTROL_BITS.left) === 0,
+      right: (mask & JOYSTICK_CONTROL_BITS.right) === 0,
+      fire: (mask & JOYSTICK_CONTROL_BITS.fire) === 0,
+    };
+  }
+
+  #clearHeldInputState(): void {
+    for (const interval of this.#heldKeyboardIntervals.values()) {
+      clearInterval(interval);
+    }
+    this.#heldKeyboardIntervals.clear();
+    this.#heldJoystickMasks.clear();
   }
 
 }

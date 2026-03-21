@@ -4,6 +4,10 @@ import {
   C64_REGISTER_DEFINITIONS,
   breakpointKindSchema,
   executionStateSchema,
+  inputActionSchema,
+  joystickControlSchema,
+  joystickPortSchema,
+  programLoadModeSchema,
   responseMetaSchema,
   stopReasonSchema,
   toolErrorSchema,
@@ -52,6 +56,41 @@ export const breakpointSchema = z.object({
   hasCondition: z.boolean().describe('Whether the breakpoint has a condition expression'),
   kind: breakpointKindSchema.describe('Breakpoint trigger kind'),
   label: z.string().nullable().optional().describe('Optional caller-provided label'),
+});
+
+export const joystickStateSchema = z.object({
+  up: z.boolean().describe('Whether up is currently held on the selected joystick port'),
+  down: z.boolean().describe('Whether down is currently held on the selected joystick port'),
+  left: z.boolean().describe('Whether left is currently held on the selected joystick port'),
+  right: z.boolean().describe('Whether right is currently held on the selected joystick port'),
+  fire: z.boolean().describe('Whether fire is currently held on the selected joystick port'),
+});
+
+export const programLoadResultSchema = z.object({
+  filePath: z.string().describe('Absolute path to the program file that was loaded'),
+  mode: programLoadModeSchema.describe('Program loading mode used for this request'),
+  start: address16Schema.nullable().describe('Memory-mode load address, or null for autostart'),
+  length: z.number().int().min(0).nullable().describe('Program byte length written in memory mode, or null for autostart'),
+  written: z.boolean().nullable().describe('Whether the program bytes were written directly into memory, or null for autostart'),
+  runAfterLoading: z.boolean().nullable().describe('Autostart run flag, or null for memory mode'),
+  fileIndex: z.number().int().nonnegative().nullable().describe('Autostart file index, or null for memory mode'),
+  executionState: executionStateSchema.nullable().describe('Execution state after autostart, or null for memory mode'),
+});
+
+export const keyboardInputResultSchema = z.object({
+  action: inputActionSchema.describe('Keyboard action that was applied'),
+  key: z.string().describe('Normalized symbolic key name'),
+  applied: z.boolean().describe('Whether the request was accepted and applied'),
+  held: z.boolean().describe('Whether the key is still treated as held after this request'),
+  mode: z.enum(['buffered_text', 'buffered_text_repeat']).describe('Keyboard delivery mode supported by the VICE protocol'),
+});
+
+export const joystickInputResultSchema = z.object({
+  port: joystickPortSchema.describe('Joystick port that received the input'),
+  action: inputActionSchema.describe('Joystick action that was applied'),
+  control: joystickControlSchema.describe('Joystick control that was applied'),
+  applied: z.boolean().describe('Whether the request was accepted and applied'),
+  state: joystickStateSchema,
 });
 
 export function toolOutputSchema<T extends z.ZodTypeAny>(dataSchema: T) {

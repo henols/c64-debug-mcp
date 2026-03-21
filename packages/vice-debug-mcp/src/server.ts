@@ -7,6 +7,10 @@ import {
   emulatorStatusSchema,
   emulatorConfigSchema,
   executionStateSchema,
+  inputActionSchema,
+  joystickControlSchema,
+  joystickPortSchema,
+  programLoadModeSchema,
   resetModeSchema,
 } from './contracts.js';
 import { normalizeToolError } from './errors.js';
@@ -17,12 +21,16 @@ import {
   c64PartialRegisterValueSchema,
   c64RegisterValueSchema,
   debugStateSchema,
+  joystickInputResultSchema,
+  keyboardInputResultSchema,
+  programLoadResultSchema,
   toolOutputSchema,
   warningSchema,
 } from './schemas.js';
 import { ViceSession } from './session.js';
 
 const viceSession = new ViceSession();
+const noInputSchema = z.object({}).strict();
 
 function createViceTool<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny>(options: {
   id: string;
@@ -87,6 +95,7 @@ function normalizeBreakpoint(
 const getEmulatorStatusTool = createViceTool({
   id: 'get_emulator_status',
   description: 'Returns emulator configuration and readiness state without debugger details.',
+  inputSchema: noInputSchema,
   dataSchema: emulatorStatusSchema,
   mcp: {
     annotations: {
@@ -114,6 +123,7 @@ const setEmulatorConfigTool = createViceTool({
 const getEmulatorConfigTool = createViceTool({
   id: 'get_emulator_config',
   description: 'Returns the current managed emulator config.',
+  inputSchema: noInputSchema,
   dataSchema: z.object({
     config: emulatorConfigSchema,
   }),
@@ -123,6 +133,7 @@ const getEmulatorConfigTool = createViceTool({
 const resetConfigTool = createViceTool({
   id: 'reset_config',
   description: 'Clears the managed emulator config and terminates the current emulator instance.',
+  inputSchema: noInputSchema,
   dataSchema: z.object({
     cleared: z.boolean(),
     hadConfig: z.boolean(),
@@ -134,6 +145,7 @@ const resetConfigTool = createViceTool({
 const getDebugStateTool = createViceTool({
   id: 'get_debug_state',
   description: 'Returns the current debugger state with program counter and C64 registers.',
+  inputSchema: noInputSchema,
   dataSchema: debugStateSchema,
   execute: async () => await viceSession.getDebugState(),
 });
@@ -287,37 +299,18 @@ const breakpointClearTool = createViceTool({
   execute: async (input) => await viceSession.breakpointClear(input.breakpointId),
 });
 
-const loadProgramTool = createViceTool({
-  id: 'load_program',
-  description: 'Loads a PRG into memory using its header load address unless overridden.',
+const programLoadTool = createViceTool({
+  id: 'program_load',
+  description: 'Loads a program either directly into memory or through VICE autostart.',
   inputSchema: z.object({
     filePath: z.string(),
-    address: address16Schema.optional().describe('Optional override load address in the 16-bit C64 address space'),
+    mode: programLoadModeSchema.describe('Use memory to insert bytes directly or autostart to delegate loading to VICE'),
+    address: address16Schema.optional().describe('Optional override load address for memory mode'),
+    runAfterLoading: z.boolean().default(true).describe('Whether autostart should immediately run after loading'),
+    fileIndex: z.number().int().nonnegative().default(0).describe('Autostart file index inside the image, when applicable'),
   }),
-  dataSchema: z.object({
-    filePath: z.string(),
-    start: address16Schema.describe('Load address used for the program'),
-    length: z.number().int().min(0).describe('Number of bytes written'),
-    written: z.boolean().describe('Whether the program was loaded successfully'),
-  }),
-  execute: async (input) => await viceSession.loadProgram(input.filePath, input.address ?? null),
-});
-
-const autostartProgramTool = createViceTool({
-  id: 'autostart_program',
-  description: 'Asks VICE to autostart a program file.',
-  inputSchema: z.object({
-    filePath: z.string(),
-    runAfterLoading: z.boolean().default(true),
-    fileIndex: z.number().int().nonnegative().default(0),
-  }),
-  dataSchema: z.object({
-    filePath: z.string(),
-    runAfterLoading: z.boolean(),
-    fileIndex: z.number().int(),
-    executionState: executionStateSchema,
-  }),
-  execute: async (input) => await viceSession.autostartProgram(input.filePath, input.runAfterLoading, input.fileIndex),
+  dataSchema: programLoadResultSchema,
+  execute: async (input) => await viceSession.programLoad(input),
 });
 
 const captureDisplayTool = createViceTool({
@@ -344,6 +337,7 @@ const captureDisplayTool = createViceTool({
 const getBanksTool = createViceTool({
   id: 'get_banks',
   description: 'Lists VICE memory banks.',
+  inputSchema: noInputSchema,
   dataSchema: z.object({
     banks: z.array(
       z.object({
@@ -358,6 +352,7 @@ const getBanksTool = createViceTool({
 const getInfoTool = createViceTool({
   id: 'get_info',
   description: 'Returns VICE version information.',
+  inputSchema: noInputSchema,
   dataSchema: z.object({
     viceVersion: z.string(),
     versionComponents: z.array(z.number().int()),
@@ -377,6 +372,31 @@ const sendKeysTool = createViceTool({
     length: z.number().int(),
   }),
   execute: async (input) => await viceSession.sendKeys(input.keys),
+});
+
+const keyboardInputTool = createViceTool({
+  id: 'keyboard_input',
+  description: 'Applies low-level keyboard-style input using symbolic key names on top of the VICE keyboard buffer.',
+  inputSchema: z.object({
+    action: inputActionSchema.describe('Use tap for a single key event or press/release for repeated buffered input'),
+    key: z.string().min(1).describe('Single ASCII key or symbolic key name such as SPACE or ENTER'),
+    durationMs: z.number().int().positive().optional().describe('Tap duration in milliseconds'),
+  }),
+  dataSchema: keyboardInputResultSchema,
+  execute: async (input) => await viceSession.keyboardInput(input.action, input.key, input.durationMs),
+});
+
+const joystickInputTool = createViceTool({
+  id: 'joystick_input',
+  description: 'Applies joystick input on C64 joystick port 1 or 2 with press, release, or tap semantics.',
+  inputSchema: z.object({
+    port: joystickPortSchema.describe('Joystick port number'),
+    action: inputActionSchema.describe('Joystick action to apply'),
+    control: joystickControlSchema.describe('Joystick direction or fire control'),
+    durationMs: z.number().int().positive().optional().describe('Tap duration in milliseconds'),
+  }),
+  dataSchema: joystickInputResultSchema,
+  execute: async (input) => await viceSession.joystickInput(input.port, input.action, input.control, input.durationMs),
 });
 
 export const viceDebugServer = new MCPServer({
@@ -400,12 +420,13 @@ export const viceDebugServer = new MCPServer({
     get_breakpoint: getBreakpointTool,
     breakpoint_set: breakpointSetTool,
     breakpoint_clear: breakpointClearTool,
-    load_program: loadProgramTool,
-    autostart_program: autostartProgramTool,
+    program_load: programLoadTool,
     capture_display: captureDisplayTool,
     get_banks: getBanksTool,
     get_info: getInfoTool,
     send_keys: sendKeysTool,
+    keyboard_input: keyboardInputTool,
+    joystick_input: joystickInputTool,
   },
 });
 

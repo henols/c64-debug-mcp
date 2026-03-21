@@ -38,6 +38,10 @@ export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready'
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
 export const memSpaceSchema = z.enum(['main', 'drive8', 'drive9', 'drive10', 'drive11']);
+export const programLoadModeSchema = z.enum(['memory', 'autostart']);
+export const inputActionSchema = z.enum(['press', 'release', 'tap']);
+export const joystickControlSchema = z.enum(['up', 'down', 'left', 'right', 'fire']);
+export const joystickPortSchema = z.union([z.literal(1), z.literal(2)]);
 export const toolErrorCategorySchema = z.enum([
   'validation',
   'configuration',
@@ -74,6 +78,10 @@ export type SessionHealth = z.infer<typeof sessionHealthSchema>;
 export type BreakpointKind = z.infer<typeof breakpointKindSchema>;
 export type ResetMode = z.infer<typeof resetModeSchema>;
 export type MemSpaceName = z.infer<typeof memSpaceSchema>;
+export type ProgramLoadMode = z.infer<typeof programLoadModeSchema>;
+export type InputAction = z.infer<typeof inputActionSchema>;
+export type JoystickControl = z.infer<typeof joystickControlSchema>;
+export type JoystickPort = z.infer<typeof joystickPortSchema>;
 export type EmulatorConfig = z.infer<typeof emulatorConfigSchema>;
 export type ResponseMeta = z.infer<typeof responseMetaSchema>;
 export type C64RegisterName = 'PC' | 'A' | 'X' | 'Y' | 'SP' | 'FL' | '00' | '01' | 'LIN' | 'CYC';

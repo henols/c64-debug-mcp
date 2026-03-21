@@ -34,6 +34,7 @@ export const enum CommandType {
   RegistersAvailable = 0x83,
   DisplayGet = 0x84,
   Info = 0x85,
+  JoyportSet = 0xa2,
   Exit = 0xaa,
   Quit = 0xbb,
   Reset = 0xcc,
@@ -61,6 +62,7 @@ const enum ResponseType {
   RegistersAvailable = 0x83,
   DisplayGet = 0x84,
   Info = 0x85,
+  JoyportSet = 0xa2,
   Exit = 0xaa,
   Quit = 0xbb,
   Reset = 0xcc,
@@ -588,6 +590,13 @@ export class ViceMonitorClient extends EventEmitter {
     body[0] = encoded.length;
     encoded.copy(body, 1);
     return this.send(CommandType.KeyboardFeed, body);
+  }
+
+  async setJoyport(port: number, value: number): Promise<ParsedEmptyResponse> {
+    const body = Buffer.alloc(4);
+    body.writeUInt16LE(port, 0);
+    body.writeUInt16LE(value, 2);
+    return this.send(CommandType.JoyportSet, body);
   }
 
   async send<T extends ParsedResponse>(commandType: CommandType, body: Buffer, timeoutMs = 5000): Promise<T> {
