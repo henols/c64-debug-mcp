@@ -1,4 +1,7 @@
-import { toolErrorSchema, type ToolError } from './contracts.js';
+import { ZodError } from 'zod';
+
+import { type ToolError } from './contracts.js';
+import { toolErrorSchema } from './schemas.js';
 
 export class ViceMcpError extends Error {
   readonly code: string;
@@ -26,10 +29,6 @@ export function validationError(message: string, details?: Record<string, unknow
   throw new ViceMcpError('validation_error', message, 'validation', false, details);
 }
 
-export function sessionStateError(message: string, details?: Record<string, unknown>): never {
-  throw new ViceMcpError('session_state_error', message, 'session_state', false, details);
-}
-
 export function debuggerNotPausedError(details?: Record<string, unknown>): never {
   throw new ViceMcpError(
     'debugger_not_paused',
@@ -44,38 +43,104 @@ export function unsupportedError(message: string, details?: Record<string, unkno
   throw new ViceMcpError('unsupported', message, 'unsupported', false, details);
 }
 
-export function toToolError(error: unknown): ToolError {
-  if (error instanceof ViceMcpError) {
-    return toolErrorSchema.parse({
-      code: error.code,
-      message: error.message,
-      category: error.category,
-      retryable: error.retryable,
-      details: error.details,
-    });
-  }
-
-  if (error instanceof Error) {
-    return toolErrorSchema.parse({
-      code: 'internal_error',
-      message: error.message,
-      category: 'internal',
-      retryable: false,
-    });
-  }
-
+function asToolError(error: ViceMcpError): ToolError {
   return toolErrorSchema.parse({
-    code: 'internal_error',
-    message: 'Unknown error',
-    category: 'internal',
-    retryable: false,
+    code: error.code,
+    message: error.message,
+    category: error.category,
+    retryable: error.retryable,
+    details: error.details,
   });
 }
 
-export async function wrapToolResult<T>(operation: () => Promise<T>): Promise<{ ok: true; data: T } | { ok: false; error: ToolError }> {
-  try {
-    return { ok: true, data: await operation() };
-  } catch (error) {
-    return { ok: false, error: toToolError(error) };
+function zodDetails(error: ZodError): Record<string, unknown> {
+  return {
+    issues: error.issues.map((issue) => ({
+      code: issue.code,
+      message: issue.message,
+      path: issue.path,
+    })),
+  };
+}
+
+function publicMessageFor(error: ViceMcpError): string {
+  switch (error.code) {
+    case 'debugger_not_paused':
+      return 'Debugger tools require the emulator to be paused first. Call execute(action="pause") before reading or mutating debug state.';
+    case 'validation_error':
+    case 'invalid_prg':
+    case 'unsupported':
+      return error.message;
+    case 'port_allocation_failed':
+    case 'port_in_use':
+    case 'monitor_timeout':
+      return 'The server could not start a usable emulator session. Check the emulator configuration and try again.';
+    case 'not_connected':
+    case 'connection_closed':
+    case 'socket_write_failed':
+    case 'timeout':
+      return 'The server could not communicate with the emulator. Try the request again.';
+    case 'protocol_invalid_stx':
+    case 'vice_protocol_error':
+      return 'The emulator returned an unexpected debugger response. Try the request again.';
+    default:
+      switch (error.category) {
+        case 'validation':
+        case 'session_state':
+        case 'unsupported':
+          return error.message;
+        case 'configuration':
+        case 'process_launch':
+          return 'The server could not start the emulator with the current configuration.';
+        case 'connection':
+        case 'timeout':
+          return 'The server could not communicate with the emulator. Try the request again.';
+        case 'protocol':
+          return 'The emulator returned an unexpected debugger response. Try the request again.';
+        case 'io':
+          return 'The requested file operation could not be completed.';
+        case 'internal':
+          return 'The server hit an unexpected error.';
+      }
   }
+}
+
+function publicDetailsFor(error: ViceMcpError): Record<string, unknown> | undefined {
+  switch (error.category) {
+    case 'validation':
+    case 'session_state':
+    case 'unsupported':
+      return error.details;
+    default:
+      return undefined;
+  }
+}
+
+export function normalizeToolError(error: unknown): ViceMcpError {
+  if (error instanceof ViceMcpError) {
+    const normalized = asToolError(error);
+    return new ViceMcpError(
+      normalized.code,
+      publicMessageFor(error),
+      normalized.category,
+      normalized.retryable,
+      publicDetailsFor(error),
+    );
+  }
+
+  if (error instanceof ZodError) {
+    return new ViceMcpError(
+      'validation_error',
+      error.issues.map((issue) => issue.message).join('; ') || 'Validation failed',
+      'validation',
+      false,
+      zodDetails(error),
+    );
+  }
+
+  if (error instanceof Error) {
+    return new ViceMcpError('internal_error', 'The server hit an unexpected error.', 'internal', false);
+  }
+
+  return new ViceMcpError('internal_error', 'The server hit an unexpected error.', 'internal', false);
 }

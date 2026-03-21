@@ -38,6 +38,22 @@ export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready'
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
 export const memSpaceSchema = z.enum(['main', 'drive8', 'drive9', 'drive10', 'drive11']);
+export const toolErrorCategorySchema = z.enum([
+  'validation',
+  'configuration',
+  'session_state',
+  'process_launch',
+  'connection',
+  'protocol',
+  'timeout',
+  'io',
+  'unsupported',
+  'internal',
+]);
+export const warningItemSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
 export const emulatorConfigSchema = z.object({
   emulatorType: z.string().min(1).default(DEFAULT_MACHINE_TYPE),
   binaryPath: z.string().optional(),
@@ -156,24 +172,13 @@ export const emulatorStatusSchema = z.object({
   configured: z.boolean(),
   status: sessionHealthSchema,
   machineType: z.string().nullable(),
-  warnings: z.array(z.object({ code: z.string(), message: z.string() })),
+  warnings: z.array(warningItemSchema),
 });
 
 export const toolErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
-  category: z.enum([
-    'validation',
-    'configuration',
-    'session_state',
-    'process_launch',
-    'connection',
-    'protocol',
-    'timeout',
-    'io',
-    'unsupported',
-    'internal',
-  ]),
+  category: toolErrorCategorySchema,
   retryable: z.boolean(),
   details: z.record(z.unknown()).optional(),
 });

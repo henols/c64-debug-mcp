@@ -21,7 +21,7 @@ import {
   type StopReason,
   type WarningItem,
 } from './contracts.js';
-import { ViceMcpError, debuggerNotPausedError, sessionStateError, validationError } from './errors.js';
+import { ViceMcpError, debuggerNotPausedError, validationError } from './errors.js';
 import { ViceMonitorClient } from './vice-protocol.js';
 
 function sleep(ms: number): Promise<void> {
@@ -231,7 +231,6 @@ export async function isPortAvailable(host: string, port: number): Promise<boole
 
 type LaunchMode = 'initial' | 'config_update' | 'restart';
 type C64RegisterValues = Record<C64RegisterName, number>;
-type C64RegisterMetadata = Record<C64RegisterName, { widthBits: 8 | 16; min: number; max: number; description: string }>;
 type DebugState = {
   executionState: SessionState['executionState'];
   lastStopReason: StopReason;
@@ -347,7 +346,7 @@ export class ViceSession {
     return await this.#readDebugState();
   }
 
-  getEmulatorConfig(): { config: EmulatorConfig | null } {
+  getEmulatorConfig(): { config: EmulatorConfig } {
     return {
       config: this.#config ? { ...this.#config } : defaultEmulatorConfig(),
     };
@@ -430,16 +429,6 @@ export class ViceSession {
     return meta;
   }
 
-  async getRegisters() {
-    await this.#ensurePausedForDebug();
-    const registers = await this.#readRegisters();
-
-    return {
-      machine: this.#machineType ?? 'unknown',
-      registers,
-    };
-  }
-
   async execute(action: 'pause' | 'resume' | 'step' | 'step_over' | 'step_out' | 'reset', count = 1, resetMode: 'soft' | 'hard' = 'soft') {
     switch (action) {
       case 'pause':
@@ -455,14 +444,6 @@ export class ViceSession {
       case 'reset':
         return await this.resetMachine(resetMode);
     }
-  }
-
-  async getRegisterMetadata() {
-    await this.#ensurePausedForDebug();
-    return {
-      machine: this.#machineType ?? 'unknown',
-      registers: this.#getC64RegisterMetadata(),
-    };
   }
 
   async setRegisters(registers: Partial<Record<C64RegisterName, number>>) {
@@ -564,114 +545,6 @@ export class ViceSession {
       lastStopReason: debugState.lastStopReason,
       programCounter: debugState.programCounter,
       registers: debugState.registers,
-    };
-  }
-
-  async searchMemory(start: number, end: number, pattern: number[], bank = 0, memSpace: MemSpaceName = 'main', maxResults = 10) {
-    await this.#ensureReady();
-    this.#validateRange(start, end);
-    const haystack = await this.#client.readMemory(start, end, memSpace, bank);
-    const needle = Uint8Array.from(pattern);
-    if (needle.length === 0) {
-      validationError('search_memory pattern must not be empty');
-    }
-    if (pattern.some((value) => !Number.isInteger(value) || value < 0 || value > 0xff)) {
-      validationError('search_memory pattern must contain only integer byte values between 0 and 255');
-    }
-
-    const matches: Array<{ address: number; offset: number }> = [];
-    for (let offset = 0; offset <= haystack.bytes.length - needle.length; offset += 1) {
-      let equal = true;
-      for (let index = 0; index < needle.length; index += 1) {
-        if (haystack.bytes[offset + index] !== needle[index]) {
-          equal = false;
-          break;
-        }
-      }
-      if (equal) {
-        const address = start + offset;
-        matches.push({ address, offset });
-        if (matches.length >= maxResults) {
-          break;
-        }
-      }
-    }
-
-    return {
-      start,
-      end,
-      pattern: Array.from(needle),
-      bank,
-      matches,
-      truncated: matches.length >= maxResults,
-    };
-  }
-
-  async fillMemory(start: number, end: number, pattern: number[], bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureReady();
-    this.#validateRange(start, end);
-    const bytes = Uint8Array.from(pattern);
-    if (bytes.length === 0) {
-      validationError('fill_memory pattern must not be empty');
-    }
-    if (pattern.some((value) => !Number.isInteger(value) || value < 0 || value > 0xff)) {
-      validationError('fill_memory pattern must contain only integer byte values between 0 and 255');
-    }
-    const result = new Uint8Array(end - start + 1);
-    for (let index = 0; index < result.length; index += 1) {
-      result[index] = bytes[index % bytes.length]!;
-    }
-    await this.#client.writeMemory(start, result, memSpace, bank);
-    return {
-      start,
-      end,
-      length: result.length,
-      bank,
-      pattern: Array.from(bytes),
-    };
-  }
-
-  async copyMemory(sourceStart: number, destStart: number, length: number, sourceBank = 0, destBank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureReady();
-    if (length <= 0) {
-      validationError('copy_memory length must be greater than zero');
-    }
-    const source = await this.#client.readMemory(sourceStart, sourceStart + length - 1, memSpace, sourceBank);
-    await this.#client.writeMemory(destStart, source.bytes, memSpace, destBank);
-    return { sourceStart, destStart, length, sourceBank, destBank };
-  }
-
-  async compareMemory(firstStart: number, secondStart: number, length: number, firstBank = 0, secondBank = 0, memSpace: MemSpaceName = 'main', maxDifferences = 25) {
-    await this.#ensureReady();
-    if (length <= 0) {
-      validationError('compare_memory length must be greater than zero');
-    }
-    const [left, right] = await Promise.all([
-      this.#client.readMemory(firstStart, firstStart + length - 1, memSpace, firstBank),
-      this.#client.readMemory(secondStart, secondStart + length - 1, memSpace, secondBank),
-    ]);
-
-    const differences = [];
-    for (let offset = 0; offset < length; offset += 1) {
-      if (left.bytes[offset] !== right.bytes[offset]) {
-        differences.push({
-          offset,
-          firstAddress: firstStart + offset,
-          secondAddress: secondStart + offset,
-          firstValue: left.bytes[offset],
-          secondValue: right.bytes[offset],
-        });
-        if (differences.length >= maxDifferences) {
-          break;
-        }
-      }
-    }
-
-    return {
-      length,
-      equal: differences.length === 0,
-      differences,
-      truncated: differences.length >= maxDifferences,
     };
   }
 
@@ -810,43 +683,6 @@ export class ViceSession {
     };
   }
 
-  async enableBreakpoint(breakpointId: number, enabled: boolean) {
-    await this.#ensurePausedForDebug();
-    await this.#client.toggleBreakpoint(breakpointId, enabled);
-    return {
-      breakpointId,
-      enabled,
-    };
-  }
-
-  async setBreakpointCondition(breakpointId: number, condition: string) {
-    await this.#ensurePausedForDebug();
-    await this.#client.setBreakpointCondition(breakpointId, condition);
-    return {
-      breakpointId,
-      hasCondition: true,
-      conditionTrackedByServer: false,
-    };
-  }
-
-  async setWatchpoint(
-    start: number,
-    end: number | undefined,
-    accessKind: 'read' | 'write' | 'read_write',
-    condition?: string,
-    label?: string,
-    memSpace?: MemSpaceName,
-  ) {
-    return this.setBreakpoint({
-      kind: accessKind,
-      start,
-      end,
-      condition,
-      label,
-      memSpace,
-    });
-  }
-
   async breakpointSet(options: {
     kind: BreakpointKind;
     address: number;
@@ -907,25 +743,6 @@ export class ViceSession {
       runAfterLoading,
       fileIndex,
       executionState: this.#executionState,
-    };
-  }
-
-  async saveMemory(filePath: string, start: number, end: number, asPrg = true, bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensurePausedForDebug();
-    this.#validateRange(start, end);
-    const response = await this.#client.readMemory(start, end, memSpace, bank);
-    const absolutePath = path.resolve(filePath);
-    const payload = asPrg
-      ? Buffer.concat([Buffer.from([start & 0xff, (start >> 8) & 0xff]), Buffer.from(response.bytes)])
-      : Buffer.from(response.bytes);
-    await fs.writeFile(absolutePath, payload);
-    return {
-      filePath: absolutePath,
-      start,
-      end,
-      length: response.bytes.length,
-      asPrg,
-      bank,
     };
   }
 
@@ -1301,19 +1118,6 @@ export class ViceSession {
     ) as C64RegisterValues;
   }
 
-  #getC64RegisterMetadata(): C64RegisterMetadata {
-    return Object.fromEntries(
-      C64_REGISTER_DEFINITIONS.map((definition) => [
-        definition.fieldName,
-        {
-          widthBits: definition.widthBits,
-          min: definition.min,
-          max: definition.max,
-          description: definition.description,
-        },
-      ]),
-    ) as C64RegisterMetadata;
-  }
 }
 
 function splitCommandLine(input: string): string[] {
