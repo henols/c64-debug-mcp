@@ -30,6 +30,16 @@ export function sessionStateError(message: string, details?: Record<string, unkn
   throw new ViceMcpError('session_state_error', message, 'session_state', false, details);
 }
 
+export function debuggerNotPausedError(details?: Record<string, unknown>): never {
+  throw new ViceMcpError(
+    'debugger_not_paused',
+    'Debugger tools require the emulator to be paused first. Call execute(action="pause") before reading or mutating debug state.',
+    'session_state',
+    false,
+    details,
+  );
+}
+
 export function unsupportedError(message: string, details?: Record<string, unknown>): never {
   throw new ViceMcpError('unsupported', message, 'unsupported', false, details);
 }

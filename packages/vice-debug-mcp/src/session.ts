@@ -25,7 +25,7 @@ import {
   type StopReason,
   type WarningItem,
 } from './contracts.js';
-import { ViceMcpError, sessionStateError, validationError } from './errors.js';
+import { ViceMcpError, debuggerNotPausedError, sessionStateError, validationError } from './errors.js';
 import { SymbolStore } from './symbols.js';
 import { ViceMonitorClient } from './vice-protocol.js';
 
@@ -368,8 +368,7 @@ export class ViceSession {
   }
 
   async getDebugState(): Promise<DebugState> {
-    await this.#ensureReady();
-    this.#lastExecutionIntent = this.#executionState === 'running' ? 'manual_break' : this.#lastStopReason;
+    await this.#ensurePausedForDebug();
     return await this.#readDebugState();
   }
 
@@ -437,7 +436,7 @@ export class ViceSession {
   }
 
   async getRegisters() {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const registers = await this.#readRegisters();
 
     return {
@@ -449,10 +448,7 @@ export class ViceSession {
   async execute(action: 'pause' | 'resume' | 'step' | 'step_over' | 'step_out' | 'reset', count = 1, resetMode: 'soft' | 'hard' = 'soft') {
     switch (action) {
       case 'pause':
-        return {
-          ...(await this.getDebugState()),
-          warnings: [] as WarningItem[],
-        };
+        return await this.#pauseExecution();
       case 'resume':
         return await this.continueExecution();
       case 'step':
@@ -467,7 +463,7 @@ export class ViceSession {
   }
 
   async getRegisterMetadata() {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     return {
       machine: this.#machineType ?? 'unknown',
       registers: this.#getC64RegisterMetadata(),
@@ -475,7 +471,7 @@ export class ViceSession {
   }
 
   async setRegisters(registers: Partial<Record<C64RegisterName, number>>) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const metadata = await this.#client.getRegistersAvailable();
     const metadataByName = new Map(metadata.registers.map((item) => [item.name.toUpperCase(), item]));
 
@@ -509,7 +505,6 @@ export class ViceSession {
     });
 
     const response = await this.#client.setRegisters(payload);
-    this.#applyResumePolicy(true);
     const updatedById = new Map(response.registers.map((register) => [register.id, register.value]));
     this.#lastRegisters = this.#mergeRegisters(
       this.#lastRegisters,
@@ -546,7 +541,7 @@ export class ViceSession {
   }
 
   async readMemory(start: number, end: number, bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, memSpace, bank);
     return {
@@ -556,7 +551,7 @@ export class ViceSession {
   }
 
   async writeMemory(start: number, data: number[], bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const bytes = Uint8Array.from(data);
     if (bytes.length === 0) {
       validationError('write_memory requires at least one byte');
@@ -566,13 +561,12 @@ export class ViceSession {
     }
     await this.#client.writeMemory(start, bytes, memSpace, bank);
     const debugState = await this.#readDebugState();
-    this.#applyResumePolicy(true);
     return {
       address: start,
       length: bytes.length,
       worked: true,
-      executionState: this.#resumePolicy === 'preserve_pause_state' ? debugState.executionState : 'running',
-      lastStopReason: this.#resumePolicy === 'preserve_pause_state' ? debugState.lastStopReason : 'none',
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
       programCounter: debugState.programCounter,
       registers: debugState.registers,
     };
@@ -633,7 +627,6 @@ export class ViceSession {
       result[index] = bytes[index % bytes.length]!;
     }
     await this.#client.writeMemory(start, result, memSpace, bank);
-    this.#applyResumePolicy(true);
     return {
       start,
       end,
@@ -650,7 +643,6 @@ export class ViceSession {
     }
     const source = await this.#client.readMemory(sourceStart, sourceStart + length - 1, memSpace, sourceBank);
     await this.#client.writeMemory(destStart, source.bytes, memSpace, destBank);
-    this.#applyResumePolicy(true);
     return { sourceStart, destStart, length, sourceBank, destBank };
   }
 
@@ -690,7 +682,13 @@ export class ViceSession {
 
   async continueExecution() {
     await this.#ensureReady();
-    const debugState = this.#lastRegisters ? this.#buildDebugState(this.#lastRegisters) : await this.#readDebugState();
+    if (this.#executionState !== 'stopped_in_monitor' || !this.#lastRegisters) {
+      debuggerNotPausedError({
+        executionState: this.#executionState,
+        lastStopReason: this.#lastStopReason,
+      });
+    }
+    const debugState = this.#buildDebugState(this.#lastRegisters);
     this.#lastExecutionIntent = 'unknown';
     await this.#client.continueExecution();
     this.#executionState = 'running';
@@ -754,7 +752,7 @@ export class ViceSession {
   }
 
   async listBreakpoints(includeDisabled = true) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const response = await this.#client.listBreakpoints();
     return {
       breakpoints: response.checkpoints.filter((breakpoint) => (includeDisabled ? true : breakpoint.enabled)),
@@ -762,7 +760,7 @@ export class ViceSession {
   }
 
   async getBreakpoint(breakpointId: number) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const response = await this.#client.getBreakpoint(breakpointId);
     return {
       breakpoint: response.checkpoint,
@@ -779,7 +777,7 @@ export class ViceSession {
     temporary?: boolean;
     enabled?: boolean;
   }) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const response = await this.#client.setBreakpoint({
       start: options.start,
       end: options.end,
@@ -804,7 +802,7 @@ export class ViceSession {
   }
 
   async deleteBreakpoint(breakpointId: number) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     await this.#client.deleteBreakpoint(breakpointId);
     const debugState = await this.#readDebugState();
     return {
@@ -818,7 +816,7 @@ export class ViceSession {
   }
 
   async enableBreakpoint(breakpointId: number, enabled: boolean) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     await this.#client.toggleBreakpoint(breakpointId, enabled);
     return {
       breakpointId,
@@ -827,7 +825,7 @@ export class ViceSession {
   }
 
   async setBreakpointCondition(breakpointId: number, condition: string) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     await this.#client.setBreakpointCondition(breakpointId, condition);
     return {
       breakpointId,
@@ -885,7 +883,7 @@ export class ViceSession {
   }
 
   async loadProgram(filePath: string, addressOverride?: number | null) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const absolutePath = path.resolve(filePath);
     const contents = await fs.readFile(absolutePath);
     if (contents.length < 2) {
@@ -895,7 +893,6 @@ export class ViceSession {
     const loadAddress = addressOverride ?? contents.readUInt16LE(0);
     const bytes = addressOverride == null ? contents.subarray(2) : contents;
     await this.#client.writeMemory(loadAddress, bytes);
-    this.#applyResumePolicy(true);
     return {
       filePath: absolutePath,
       start: loadAddress,
@@ -919,7 +916,7 @@ export class ViceSession {
   }
 
   async saveMemory(filePath: string, start: number, end: number, asPrg = true, bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, memSpace, bank);
     const absolutePath = path.resolve(filePath);
@@ -938,7 +935,7 @@ export class ViceSession {
   }
 
   async captureDisplay(useVic = true) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug();
     const response = await this.#client.captureDisplay(useVic);
     const warnings: WarningItem[] = [];
     let pngBase64: string | null = null;
@@ -1031,7 +1028,6 @@ export class ViceSession {
     await this.#ensureReady();
     const encoded = encodePetscii(keys);
     await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
-    this.#applyResumePolicy(true);
     return {
       sent: true,
       length: encoded.length,
@@ -1041,6 +1037,16 @@ export class ViceSession {
   async #ensureReady(): Promise<void> {
     this.#ensureConfig();
     await this.#ensureHealthyConnection();
+  }
+
+  async #ensurePausedForDebug(): Promise<void> {
+    await this.#ensureReady();
+    if (this.#executionState !== 'stopped_in_monitor') {
+      debuggerNotPausedError({
+        executionState: this.#executionState,
+        lastStopReason: this.#lastStopReason,
+      });
+    }
   }
 
   async #ensureHealthyConnection(): Promise<void> {
@@ -1256,6 +1262,33 @@ export class ViceSession {
     return this.#buildDebugState(registers);
   }
 
+  async #pauseExecution(): Promise<{
+    executionState: SessionState['executionState'];
+    lastStopReason: StopReason;
+    programCounter: number;
+    registers: C64RegisterValues;
+    warnings: WarningItem[];
+  }> {
+    await this.#ensureReady();
+
+    if (this.#executionState === 'stopped_in_monitor') {
+      const debugState = this.#lastRegisters ? this.#buildDebugState(this.#lastRegisters) : await this.#readDebugState();
+      return {
+        ...debugState,
+        warnings: [],
+      };
+    }
+
+    this.#lastExecutionIntent = 'manual_break';
+    const debugState = await this.#readDebugState();
+    this.#lastStopReason = 'manual_break';
+    return {
+      ...debugState,
+      lastStopReason: 'manual_break',
+      warnings: [],
+    };
+  }
+
   #buildDebugState(registers: C64RegisterValues): DebugState {
     this.#lastRegisters = registers;
     return {
@@ -1278,19 +1311,6 @@ export class ViceSession {
       ...current,
       ...updated,
     };
-  }
-
-  #applyResumePolicy(mutating: boolean): void {
-    if (this.#resumePolicy === 'preserve_pause_state') {
-      return;
-    }
-    if (this.#resumePolicy === 'resume_after_mutation' && !mutating) {
-      return;
-    }
-    void this.#client.continueExecution().then(() => {
-      this.#executionState = 'running';
-      this.#lastStopReason = 'none';
-    });
   }
 
   #validateRange(start: number, end: number): void {
