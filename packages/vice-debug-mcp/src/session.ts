@@ -6,24 +6,26 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import zlib from 'node:zlib';
 
 import {
-  DEFAULT_ATTACH_RECONNECT_POLICY,
+  C64_REGISTER_DEFINITIONS,
   DEFAULT_FORBIDDEN_PORTS,
-  DEFAULT_MANAGED_RECONNECT_POLICY,
+  DEFAULT_MACHINE_TYPE,
   DEFAULT_MONITOR_HOST,
   DEFAULT_RESUME_POLICY,
   defaultMachineProfile,
+  emulatorConfigSchema,
   normalizeHex,
-  type BreakpointRecord,
+  type C64RegisterName,
   type BreakpointKind,
+  type EmulatorConfig,
   type MemSpaceName,
-  type ReconnectPolicy,
+  type ResponseMeta,
   type ResumePolicy,
-  type SessionSnapshot,
+  type SessionState,
   type StopReason,
-  type ToolWarning,
+  type WarningItem,
 } from './contracts.js';
 import { ViceMcpError, sessionStateError, validationError } from './errors.js';
-import { SymbolService } from './symbols.js';
+import { SymbolStore } from './symbols.js';
 import { ViceMonitorClient } from './vice-protocol.js';
 
 function sleep(ms: number): Promise<void> {
@@ -42,6 +44,34 @@ function buildMachineType(emulatorType: string | null): string | null {
     return 'c64';
   }
   return emulatorType;
+}
+
+function resolveViceBinary(emulatorType: string): string {
+  switch (emulatorType) {
+    case 'c64':
+      return 'x64sc';
+    case 'c128':
+      return 'x128';
+    default:
+      return emulatorType;
+  }
+}
+
+function defaultEmulatorConfig(): EmulatorConfig {
+  return emulatorConfigSchema.parse({
+    emulatorType: DEFAULT_MACHINE_TYPE,
+    resumePolicy: DEFAULT_RESUME_POLICY,
+  });
+}
+
+function normalizeConfig(config: EmulatorConfig): EmulatorConfig {
+  return emulatorConfigSchema.parse({
+    emulatorType: config.emulatorType ?? DEFAULT_MACHINE_TYPE,
+    binaryPath: config.binaryPath?.trim() || undefined,
+    workingDirectory: config.workingDirectory?.trim() || undefined,
+    arguments: config.arguments?.trim() || undefined,
+    resumePolicy: config.resumePolicy ?? DEFAULT_RESUME_POLICY,
+  });
 }
 
 function encodePngGrayscale(width: number, height: number, pixels: Uint8Array): string {
@@ -95,27 +125,14 @@ function crc32(buffer: Buffer): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function normalizeRegistersMetadata(items: Array<{ id: number; size: number; name: string }>) {
-  return items.map((item) => ({
-    id: item.id,
-    name: item.name,
-    widthBits: item.size,
-  }));
-}
-
-function selectWarning(message: string, code = 'warning'): ToolWarning {
+function makeWarning(message: string, code = 'warning'): WarningItem {
   return { code, message };
 }
 
 function encodePetscii(text: string): Uint8Array {
   const bytes: number[] = [];
   for (const char of text) {
-    if (char === '\n') {
-      bytes.push(0x0d);
-      continue;
-    }
-
-    if (char === '\r') {
+    if (char === '\n' || char === '\r') {
       bytes.push(0x0d);
       continue;
     }
@@ -130,17 +147,7 @@ function encodePetscii(text: string): Uint8Array {
       continue;
     }
 
-    if (code >= 0x20 && code <= 0x5f) {
-      bytes.push(code);
-      continue;
-    }
-
-    if (code >= 0x30 && code <= 0x39) {
-      bytes.push(code);
-      continue;
-    }
-
-    if (code === 0x5c) {
+    if ((code >= 0x20 && code <= 0x5f) || (code >= 0x30 && code <= 0x39) || code === 0x5c) {
       bytes.push(code);
       continue;
     }
@@ -151,7 +158,7 @@ function encodePetscii(text: string): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
-export class PortAllocatorService {
+export class PortAllocator {
   readonly #forbiddenPorts: Set<number>;
 
   constructor(forbiddenPorts?: Iterable<number>) {
@@ -228,18 +235,20 @@ export async function isPortAvailable(host: string, port: number): Promise<boole
   });
 }
 
-export class ViceSessionService {
+type LaunchMode = 'initial' | 'config_update' | 'restart';
+type C64RegisterValues = Record<C64RegisterName, number>;
+type C64RegisterMetadata = Record<C64RegisterName, { widthBits: 8 | 16; min: number; max: number; description: string }>;
+
+export class ViceSession {
   readonly #client = new ViceMonitorClient();
-  readonly #portAllocator: PortAllocatorService;
-  readonly #symbols = new SymbolService();
+  readonly #portAllocator: PortAllocator;
+  readonly #symbols = new SymbolStore();
 
   #sessionId: string | null = null;
-  #transportState: SessionSnapshot['transportState'] = 'not_started';
-  #ownership: SessionSnapshot['emulatorOwnership'] = 'unknown';
-  #processState: SessionSnapshot['processState'] = 'not_applicable';
-  #executionState: SessionSnapshot['executionState'] = 'unknown';
+  #transportState: SessionState['transportState'] = 'not_started';
+  #processState: SessionState['processState'] = 'not_applicable';
+  #executionState: SessionState['executionState'] = 'unknown';
   #lastStopReason: StopReason = 'none';
-  #reconnectPolicy: ReconnectPolicy = DEFAULT_ATTACH_RECONNECT_POLICY;
   #resumePolicy: ResumePolicy = DEFAULT_RESUME_POLICY;
   #machineType: string | null = null;
   #host: string | null = null;
@@ -247,15 +256,22 @@ export class ViceSessionService {
   #connectedSince: string | null = null;
   #lastResponseAt: string | null = null;
   #process: ChildProcessWithoutNullStreams | null = null;
-  #warnings: ToolWarning[] = [];
+  #warnings: WarningItem[] = [];
   #lastExecutionIntent: StopReason = 'unknown';
+  #config: EmulatorConfig | null = null;
+  #recoveryInProgress = false;
+  #recoveryPromise: Promise<void> | null = null;
+  #freshEmulatorPending = false;
+  #launchId = 0;
+  #restartCount = 0;
+  #suppressRecovery = false;
 
-  constructor(portAllocator = new PortAllocatorService()) {
+  constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
     this.#client.on('response', () => {
       this.#lastResponseAt = nowIso();
     });
-    this.#client.on('event', async (event) => {
+    this.#client.on('event', (event) => {
       if (event.type === 'resumed') {
         this.#executionState = 'running';
         this.#lastStopReason = 'none';
@@ -277,18 +293,21 @@ export class ViceSessionService {
       if (this.#transportState !== 'stopped') {
         this.#transportState = 'disconnected';
       }
+      if (!this.#suppressRecovery && this.#config) {
+        void this.#scheduleRecovery();
+      }
     });
   }
 
-  get symbolService(): SymbolService {
+  get symbols(): SymbolStore {
     return this.#symbols;
   }
 
-  snapshot(): SessionSnapshot {
+  snapshot(): SessionState {
     return {
       sessionId: this.#sessionId,
       transportState: this.#transportState,
-      emulatorOwnership: this.#ownership,
+      emulatorOwnership: this.#config ? 'managed' : 'unknown',
       processState: this.#processState,
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
@@ -299,9 +318,14 @@ export class ViceSessionService {
         port: this.#port,
       },
       activePolicies: {
-        reconnectPolicy: this.#reconnectPolicy,
         resumePolicy: this.#resumePolicy,
       },
+      configPresent: this.#config != null,
+      managedByServer: this.#config != null,
+      recoveryInProgress: this.#recoveryInProgress,
+      launchId: this.#launchId,
+      restartCount: this.#restartCount,
+      freshEmulatorPending: this.#freshEmulatorPending,
       connectedSince: this.#connectedSince,
       lastResponseAt: this.#lastResponseAt,
       processId: this.#process?.pid ?? null,
@@ -309,195 +333,145 @@ export class ViceSessionService {
     };
   }
 
-  async attachSession(host: string, port: number, machineType?: string): Promise<SessionSnapshot> {
-    if (!port) {
-      validationError('Attach mode requires an explicit monitor port', { host, port });
+  getEmulatorConfig(): { config: EmulatorConfig | null } {
+    return {
+      config: this.#config ? { ...this.#config } : defaultEmulatorConfig(),
+    };
+  }
+
+  async setEmulatorConfig(config: EmulatorConfig): Promise<{ config: EmulatorConfig; session: SessionState }> {
+    const nextConfig = normalizeConfig(config);
+
+    if (!this.#sessionId) {
+      this.#sessionId = randomUUID();
     }
 
-    this.#sessionId = randomUUID();
-    this.#transportState = 'connecting';
-    this.#ownership = 'external';
+    this.#config = nextConfig;
+    this.#resumePolicy = nextConfig.resumePolicy ?? DEFAULT_RESUME_POLICY;
+    this.#warnings = this.#warnings.filter((warning) => !warning.code.startsWith('launch_') && !warning.code.startsWith('process_'));
+
+    await this.#replaceManagedEmulator('config_update');
+
+    return {
+      config: { ...nextConfig },
+      session: this.snapshot(),
+    };
+  }
+
+  async resetConfig(): Promise<{ cleared: boolean; hadConfig: boolean; session: SessionState }> {
+    const hadConfig = this.#config != null;
+
+    this.#config = null;
+    this.#freshEmulatorPending = false;
+    this.#recoveryPromise = null;
+    this.#recoveryInProgress = false;
+    this.#machineType = null;
+    this.#host = null;
+    this.#port = null;
+    this.#connectedSince = null;
+    this.#lastStopReason = 'none';
+    this.#executionState = 'unknown';
+    this.#resumePolicy = DEFAULT_RESUME_POLICY;
+    this.#warnings = [];
+
+    await this.#stopManagedProcess(true);
+
+    this.#transportState = 'not_started';
     this.#processState = 'not_applicable';
-    this.#machineType = machineType ?? null;
-    this.#reconnectPolicy = DEFAULT_ATTACH_RECONNECT_POLICY;
-    this.#host = host;
-    this.#port = port;
-    this.#warnings = [];
 
-    await this.#client.connect(host, port);
-    this.#transportState = 'connected';
-    this.#connectedSince = nowIso();
-    await this.#hydrateExecutionState();
-    return this.snapshot();
+    return {
+      cleared: true,
+      hadConfig,
+      session: this.snapshot(),
+    };
   }
 
-  async startEmulator(options: {
-    emulatorType: string;
-    binaryPath?: string;
-    arguments?: string;
-    workingDirectory?: string;
-    monitorHost?: string;
-    monitorPort?: number;
-  }): Promise<SessionSnapshot> {
-    if (this.#process) {
-      sessionStateError('A managed emulator process is already active');
-    }
-
-    const host = options.monitorHost ?? DEFAULT_MONITOR_HOST;
-    const port = options.monitorPort ?? (await this.#portAllocator.allocate());
-    await this.#portAllocator.ensureFree(port, host);
-
-    const binary = options.binaryPath ?? options.emulatorType;
-    const args = ['-binarymonitor', '-binarymonitoraddress', `${host}:${port}`];
-    if (options.arguments) {
-      args.push(...splitCommandLine(options.arguments));
-    }
-
-    this.#sessionId = randomUUID();
-    this.#transportState = 'starting';
-    this.#ownership = 'managed';
-    this.#processState = 'launching';
-    this.#machineType = buildMachineType(options.emulatorType);
-    this.#reconnectPolicy = DEFAULT_MANAGED_RECONNECT_POLICY;
-    this.#host = host;
-    this.#port = port;
-    this.#warnings = [];
-
-    const child = spawn(binary, args, {
-      cwd: options.workingDirectory ? path.resolve(options.workingDirectory) : undefined,
-      stdio: 'pipe',
-    });
-    this.#process = child;
-    child.once('exit', (code, signal) => {
-      this.#processState = code === 0 ? 'exited' : 'crashed';
-      this.#warnings = [
-        ...this.#warnings.filter((warning) => warning.code !== 'process_exit'),
-        selectWarning(`VICE process exited (${code ?? 'null'} / ${signal ?? 'null'})`, 'process_exit'),
-      ];
-    });
-    child.once('error', (error) => {
-      this.#processState = 'crashed';
-      this.#transportState = 'faulted';
-      this.#warnings = [...this.#warnings, selectWarning(error.message, 'process_error')];
-    });
-
-    this.#processState = 'running';
-    this.#transportState = 'waiting_for_monitor';
-
-    await waitForMonitor(host, port, 5000);
-    await this.#client.connect(host, port);
-    this.#transportState = 'connected';
-    this.#connectedSince = nowIso();
-    await this.#hydrateExecutionState();
-    return this.snapshot();
+  takeResponseMeta(): ResponseMeta {
+    const meta = {
+      freshEmulator: this.#freshEmulatorPending,
+      launchId: this.#launchId,
+      restartCount: this.#restartCount,
+    };
+    this.#freshEmulatorPending = false;
+    return meta;
   }
 
-  async stopEmulator(force = false): Promise<{ stopped: boolean; processId: number | null; ownership: SessionSnapshot['emulatorOwnership'] }> {
-    if (this.#ownership !== 'managed' || !this.#process) {
-      sessionStateError('No managed emulator process is active');
-    }
-
-    const processId = this.#process.pid ?? null;
-    if (!force) {
-      try {
-        await this.#client.quit();
-      } catch {
-        this.#process.kill('SIGTERM');
-      }
-    } else {
-      this.#process.kill('SIGKILL');
-    }
-
-    await sleep(250);
-    await this.#client.disconnect();
-    this.#transportState = 'stopped';
-    this.#executionState = 'unknown';
-    this.#process = null;
-    return { stopped: true, processId, ownership: 'managed' };
-  }
-
-  async disconnectSession(): Promise<{ disconnected: boolean; sessionId: string | null }> {
-    await this.#client.disconnect();
-    this.#transportState = 'disconnected';
-    this.#executionState = 'unknown';
-    return { disconnected: true, sessionId: this.#sessionId };
-  }
-
-  setResumePolicy(resumePolicy: ResumePolicy): { resumePolicy: ResumePolicy } {
-    this.#resumePolicy = resumePolicy;
-    return { resumePolicy };
-  }
-
-  async getRegisters(registerNames?: string[]) {
-    await this.#ensureConnected();
+  async getRegisters() {
+    await this.#ensureReady();
     const metadata = await this.#client.getRegistersAvailable();
     const values = await this.#client.getRegisters();
-    const metadataById = new Map(metadata.registers.map((item) => [item.id, item]));
-    const nameFilter = registerNames ? new Set(registerNames.map((item) => item.toUpperCase())) : null;
-    const registers = values.registers
-      .map((register) => {
-        const meta = metadataById.get(register.id);
-        return {
-          name: meta?.name ?? `R${register.id}`,
-          id: register.id,
-          widthBits: meta?.size ?? 16,
-          value: register.value,
-          valueHex: normalizeHex(register.value),
-        };
-      })
-      .filter((register) => (nameFilter ? nameFilter.has(register.name.toUpperCase()) : true));
 
     return {
       machine: this.#machineType ?? 'unknown',
-      registers,
+      registers: this.#mapC64Registers(metadata.registers, values.registers),
     };
   }
 
-  async getRegisterMetadata(registerNames?: string[]) {
-    await this.#ensureConnected();
-    const metadata = await this.#client.getRegistersAvailable();
-    const nameFilter = registerNames ? new Set(registerNames.map((item) => item.toUpperCase())) : null;
+  async getRegisterMetadata() {
+    await this.#ensureReady();
     return {
       machine: this.#machineType ?? 'unknown',
-      registers: normalizeRegistersMetadata(metadata.registers).filter((register) =>
-        nameFilter ? nameFilter.has(register.name.toUpperCase()) : true,
-      ),
+      registers: this.#getC64RegisterMetadata(),
     };
   }
 
-  async setRegisters(registers: Array<{ name: string; valueHex: string }>) {
-    await this.#ensureConnected();
+  async setRegisters(registers: Partial<Record<C64RegisterName, number>>) {
+    await this.#ensureReady();
     const metadata = await this.#client.getRegistersAvailable();
     const metadataByName = new Map(metadata.registers.map((item) => [item.name.toUpperCase(), item]));
 
-    const payload = registers.map((register) => {
-      const meta = metadataByName.get(register.name.toUpperCase());
+    const payload = Object.entries(registers).map(([fieldName, value]) => {
+      const definition = C64_REGISTER_DEFINITIONS.find((item) => item.fieldName === fieldName);
+      if (!definition) {
+        validationError(`Unknown register ${fieldName}`, { registerName: fieldName });
+      }
+      if (!Number.isInteger(value)) {
+        validationError(`Register ${fieldName} must be an integer`, { registerName: fieldName, value });
+      }
+      if (value < definition.min || value > definition.max) {
+        validationError(`Register ${fieldName} must be between ${definition.min} and ${definition.max}`, {
+          registerName: fieldName,
+          min: definition.min,
+          max: definition.max,
+          value,
+        });
+      }
+      const meta = metadataByName.get(definition.viceName.toUpperCase());
       if (!meta) {
-        validationError(`Unknown register ${register.name}`, { registerName: register.name });
+        validationError(`Required C64 register is missing from VICE: ${definition.viceName}`, {
+          registerName: definition.fieldName,
+          viceName: definition.viceName,
+        });
       }
       return {
         id: meta.id,
-        value: Number.parseInt(register.valueHex.replace(/^0x/i, ''), 16),
+        value,
       };
     });
 
     const response = await this.#client.setRegisters(payload);
     this.#applyResumePolicy(true);
+    const updatedById = new Map(response.registers.map((register) => [register.id, register.value]));
     return {
-      updated: response.registers.map((register) => {
-        const meta = metadata.registers.find((item) => item.id === register.id);
-        return {
-          name: meta?.name ?? `R${register.id}`,
-          value: register.value,
-          valueHex: normalizeHex(register.value),
-        };
-      }),
+      updated: Object.fromEntries(
+        C64_REGISTER_DEFINITIONS.flatMap((definition) => {
+          const meta = metadataByName.get(definition.viceName.toUpperCase());
+          if (!meta) {
+            return [];
+          }
+          const value = updatedById.get(meta.id);
+          if (value == null) {
+            return [];
+          }
+          return [[definition.fieldName, value]];
+        }),
+      ) as Partial<Record<C64RegisterName, number>>,
       executionState: this.#executionState,
     };
   }
 
   async readMemory(start: number, end: number, bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, memSpace, bank);
     return {
@@ -512,7 +486,7 @@ export class ViceSessionService {
   }
 
   async writeMemory(start: number, data: number[], bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const bytes = Uint8Array.from(data);
     if (bytes.length === 0) {
       validationError('write_memory requires at least one byte');
@@ -532,6 +506,7 @@ export class ViceSessionService {
   }
 
   async searchMemory(start: number, end: number, pattern: number[], bank = 0, memSpace: MemSpaceName = 'main', maxResults = 10) {
+    await this.#ensureReady();
     this.#validateRange(start, end);
     const haystack = await this.#client.readMemory(start, end, memSpace, bank);
     const needle = Uint8Array.from(pattern);
@@ -571,6 +546,7 @@ export class ViceSessionService {
   }
 
   async fillMemory(start: number, end: number, pattern: number[], bank = 0, memSpace: MemSpaceName = 'main') {
+    await this.#ensureReady();
     this.#validateRange(start, end);
     const bytes = Uint8Array.from(pattern);
     if (bytes.length === 0) {
@@ -595,6 +571,7 @@ export class ViceSessionService {
   }
 
   async copyMemory(sourceStart: number, destStart: number, length: number, sourceBank = 0, destBank = 0, memSpace: MemSpaceName = 'main') {
+    await this.#ensureReady();
     if (length <= 0) {
       validationError('copy_memory length must be greater than zero');
     }
@@ -605,6 +582,7 @@ export class ViceSessionService {
   }
 
   async compareMemory(firstStart: number, secondStart: number, length: number, firstBank = 0, secondBank = 0, memSpace: MemSpaceName = 'main', maxDifferences = 25) {
+    await this.#ensureReady();
     if (length <= 0) {
       validationError('compare_memory length must be greater than zero');
     }
@@ -638,7 +616,7 @@ export class ViceSessionService {
   }
 
   async continueExecution() {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     this.#lastExecutionIntent = 'unknown';
     await this.#client.continueExecution();
     this.#executionState = 'running';
@@ -646,47 +624,47 @@ export class ViceSessionService {
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
-      warnings: [] as ToolWarning[],
+      warnings: [] as WarningItem[],
     };
   }
 
   async stepInstruction(count = 1, stepOver = false) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     this.#lastExecutionIntent = 'step_complete';
     await this.#client.stepInstruction(count, stepOver);
     this.#executionState = 'stopped_in_monitor';
     this.#lastStopReason = 'step_complete';
-    const registers = await this.getRegisters(['PC']);
-    const programCounter = registers.registers[0]?.value ?? null;
+    const registers = await this.getRegisters();
+    const programCounter = registers.registers.PC ?? null;
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
       programCounter,
       programCounterHex: programCounter == null ? null : normalizeHex(programCounter),
       stepsExecuted: count,
-      warnings: [] as ToolWarning[],
+      warnings: [] as WarningItem[],
     };
   }
 
   async stepOut() {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     this.#lastExecutionIntent = 'step_complete';
     await this.#client.stepOut();
     this.#executionState = 'stopped_in_monitor';
     this.#lastStopReason = 'step_complete';
-    const registers = await this.getRegisters(['PC']);
-    const programCounter = registers.registers[0]?.value ?? null;
+    const registers = await this.getRegisters();
+    const programCounter = registers.registers.PC ?? null;
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
       programCounter,
       programCounterHex: programCounter == null ? null : normalizeHex(programCounter),
-      warnings: [] as ToolWarning[],
+      warnings: [] as WarningItem[],
     };
   }
 
   async resetMachine(mode: 'soft' | 'hard') {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     this.#lastExecutionIntent = 'reset';
     await this.#client.reset(mode);
     this.#executionState = 'stopped_in_monitor';
@@ -694,12 +672,12 @@ export class ViceSessionService {
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
-      warnings: [] as ToolWarning[],
+      warnings: [] as WarningItem[],
     };
   }
 
   async listBreakpoints(includeDisabled = true) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const response = await this.#client.listBreakpoints();
     return {
       breakpoints: response.checkpoints.filter((breakpoint) => (includeDisabled ? true : breakpoint.enabled)),
@@ -707,7 +685,7 @@ export class ViceSessionService {
   }
 
   async getBreakpoint(breakpointId: number) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const response = await this.#client.getBreakpoint(breakpointId);
     return {
       breakpoint: response.checkpoint,
@@ -724,7 +702,7 @@ export class ViceSessionService {
     temporary?: boolean;
     enabled?: boolean;
   }) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const response = await this.#client.setBreakpoint({
       start: options.start,
       end: options.end,
@@ -744,7 +722,7 @@ export class ViceSessionService {
   }
 
   async deleteBreakpoint(breakpointId: number) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     await this.#client.deleteBreakpoint(breakpointId);
     return {
       deleted: true,
@@ -753,7 +731,7 @@ export class ViceSessionService {
   }
 
   async enableBreakpoint(breakpointId: number, enabled: boolean) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     await this.#client.toggleBreakpoint(breakpointId, enabled);
     return {
       breakpointId,
@@ -762,7 +740,7 @@ export class ViceSessionService {
   }
 
   async setBreakpointCondition(breakpointId: number, condition: string) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     await this.#client.setBreakpointCondition(breakpointId, condition);
     return {
       breakpointId,
@@ -790,7 +768,7 @@ export class ViceSessionService {
   }
 
   async loadProgram(filePath: string, addressOverride?: number | null) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const absolutePath = path.resolve(filePath);
     const contents = await fs.readFile(absolutePath);
     if (contents.length < 2) {
@@ -811,7 +789,7 @@ export class ViceSessionService {
   }
 
   async autostartProgram(filePath: string, runAfterLoading = true, fileIndex = 0) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const absolutePath = path.resolve(filePath);
     await this.#client.autostartProgram(absolutePath, runAfterLoading, fileIndex);
     this.#executionState = runAfterLoading ? 'running' : 'stopped_in_monitor';
@@ -825,7 +803,7 @@ export class ViceSessionService {
   }
 
   async saveMemory(filePath: string, start: number, end: number, asPrg = true, bank = 0, memSpace: MemSpaceName = 'main') {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, memSpace, bank);
     const absolutePath = path.resolve(filePath);
@@ -846,21 +824,21 @@ export class ViceSessionService {
   }
 
   async captureDisplay(useVic = true) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const response = await this.#client.captureDisplay(useVic);
-    const warnings: ToolWarning[] = [];
+    const warnings: WarningItem[] = [];
     let pngBase64: string | null = null;
 
     if (response.bitsPerPixel === 8) {
       pngBase64 = encodePngGrayscale(response.innerWidth, response.innerHeight, response.imageBytes);
       warnings.push(
-        selectWarning(
+        makeWarning(
           'VICE returned indexed pixel data without palette metadata; pngBase64 uses grayscale mapping of indices.',
           'display_palette_unknown',
         ),
       );
     } else {
-      warnings.push(selectWarning(`Unsupported display bit depth ${response.bitsPerPixel}`, 'display_bpp_unsupported'));
+      warnings.push(makeWarning(`Unsupported display bit depth ${response.bitsPerPixel}`, 'display_bpp_unsupported'));
     }
 
     return {
@@ -918,7 +896,7 @@ export class ViceSessionService {
   }
 
   async getBanks() {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const response = await this.#client.getBanksAvailable();
     return {
       banks: response.banks,
@@ -926,7 +904,7 @@ export class ViceSessionService {
   }
 
   async getInfo() {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const info = await this.#client.getInfo();
     return {
       viceVersion: info.versionString,
@@ -935,16 +913,8 @@ export class ViceSessionService {
     };
   }
 
-  async ping() {
-    await this.#ensureConnected();
-    await this.#client.ping();
-    return {
-      responsive: true,
-    };
-  }
-
   async sendKeys(keys: string) {
-    await this.#ensureConnected();
+    await this.#ensureReady();
     const encoded = encodePetscii(keys);
     await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
     this.#applyResumePolicy(true);
@@ -954,34 +924,207 @@ export class ViceSessionService {
     };
   }
 
-  async #ensureConnected(): Promise<void> {
-    if (!this.#host || !this.#port) {
-      sessionStateError('No active VICE session');
+  async #ensureReady(): Promise<void> {
+    this.#ensureConfig();
+    await this.#ensureHealthyConnection();
+  }
+
+  async #ensureHealthyConnection(): Promise<void> {
+    if (this.#recoveryPromise) {
+      await this.#recoveryPromise;
     }
 
-    if (this.#transportState === 'connected' && this.#client.connected) {
+    const processAlive = this.#process != null && this.#process.exitCode == null && !this.#process.killed;
+    if (processAlive && this.#client.connected) {
       return;
     }
 
-    this.#transportState = 'connecting';
-    await this.#client.connect(this.#host, this.#port);
-    this.#transportState = 'connected';
-    if (!this.#connectedSince) {
+    await this.#scheduleRecovery();
+  }
+
+  async #scheduleRecovery(): Promise<void> {
+    this.#ensureConfig();
+
+    if (this.#recoveryPromise) {
+      return await this.#recoveryPromise;
+    }
+
+    this.#recoveryPromise = (async () => {
+      this.#recoveryInProgress = true;
+      try {
+        const processAlive = this.#process != null && this.#process.exitCode == null && !this.#process.killed;
+
+        if (processAlive && this.#host && this.#port) {
+          this.#transportState = 'reconnecting';
+          await this.#client.connect(this.#host, this.#port);
+          this.#transportState = 'connected';
+          if (!this.#connectedSince) {
+            this.#connectedSince = nowIso();
+          }
+          await this.#hydrateExecutionState();
+          return;
+        }
+
+        await this.#launchManagedEmulator('restart');
+      } finally {
+        this.#recoveryInProgress = false;
+        this.#recoveryPromise = null;
+      }
+    })();
+
+    return await this.#recoveryPromise;
+  }
+
+  async #replaceManagedEmulator(mode: Exclude<LaunchMode, 'restart'>): Promise<void> {
+    await this.#stopManagedProcess(true);
+    await this.#launchManagedEmulator(mode);
+  }
+
+  async #launchManagedEmulator(mode: LaunchMode): Promise<void> {
+    const config = this.#ensureConfig();
+
+    const host = DEFAULT_MONITOR_HOST;
+    const port = await this.#portAllocator.allocate();
+    await this.#portAllocator.ensureFree(port, host);
+
+    const binary = config.binaryPath ?? resolveViceBinary(config.emulatorType);
+    const args = ['-binarymonitor', '-binarymonitoraddress', `${host}:${port}`];
+    if (config.arguments) {
+      args.push(...splitCommandLine(config.arguments));
+    }
+
+    this.#transportState = 'starting';
+    this.#processState = 'launching';
+    this.#machineType = buildMachineType(config.emulatorType);
+    this.#host = host;
+    this.#port = port;
+    this.#connectedSince = null;
+    this.#executionState = 'unknown';
+
+    const child = spawn(binary, args, {
+      cwd: config.workingDirectory ? path.resolve(config.workingDirectory) : undefined,
+      stdio: 'pipe',
+    });
+    this.#process = child;
+    this.#bindProcessLifecycle(child);
+
+    this.#processState = 'running';
+    this.#transportState = 'waiting_for_monitor';
+
+    try {
+      await waitForMonitor(host, port, 5000);
+      await this.#client.connect(host, port);
+      this.#transportState = 'connected';
       this.#connectedSince = nowIso();
+      this.#launchId += 1;
+      if (mode === 'restart') {
+        this.#restartCount += 1;
+      }
+      this.#freshEmulatorPending = true;
+      await this.#hydrateExecutionState();
+    } catch (error) {
+      this.#processState = 'crashed';
+      this.#transportState = 'faulted';
+      this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'launch_failed'), makeWarning(String((error as Error).message ?? error), 'launch_failed')];
+      await this.#stopManagedProcess(true);
+      throw error;
+    }
+  }
+
+  #ensureConfig(): EmulatorConfig {
+    if (!this.#config) {
+      this.#config = defaultEmulatorConfig();
+      this.#resumePolicy = this.#config.resumePolicy ?? DEFAULT_RESUME_POLICY;
+      if (!this.#sessionId) {
+        this.#sessionId = randomUUID();
+      }
+    }
+
+    return this.#config;
+  }
+
+  #bindProcessLifecycle(child: ChildProcessWithoutNullStreams): void {
+    child.once('exit', (code, signal) => {
+      if (this.#process !== child) {
+        return;
+      }
+
+      this.#process = null;
+      this.#processState = code === 0 ? 'exited' : 'crashed';
+      this.#transportState = 'disconnected';
+      this.#warnings = [
+        ...this.#warnings.filter((warning) => warning.code !== 'process_exit'),
+        makeWarning(`VICE process exited (${code ?? 'null'} / ${signal ?? 'null'})`, 'process_exit'),
+      ];
+
+      if (!this.#suppressRecovery && this.#config) {
+        void this.#scheduleRecovery();
+      }
+    });
+
+    child.once('error', (error) => {
+      if (this.#process !== child) {
+        return;
+      }
+
+      this.#process = null;
+      this.#processState = 'crashed';
+      this.#transportState = 'faulted';
+      this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'process_error'), makeWarning(error.message, 'process_error')];
+
+      if (!this.#suppressRecovery && this.#config) {
+        void this.#scheduleRecovery();
+      }
+    });
+  }
+
+  async #stopManagedProcess(fullReset: boolean): Promise<void> {
+    this.#suppressRecovery = true;
+    try {
+      const processId = this.#process?.pid ?? null;
+
+      if (this.#client.connected) {
+        try {
+          await this.#client.quit();
+        } catch {
+          if (this.#process) {
+            this.#process.kill('SIGTERM');
+          }
+        }
+      } else if (this.#process) {
+        this.#process.kill('SIGTERM');
+      }
+
+      if (this.#process) {
+        await waitForProcessExit(this.#process, 1000).catch(() => {
+          this.#process?.kill('SIGKILL');
+        });
+      }
+
+      await this.#client.disconnect();
+      this.#process = null;
+
+      if (fullReset) {
+        this.#transportState = 'stopped';
+        this.#processState = processId == null ? 'not_applicable' : 'exited';
+      }
+    } finally {
+      this.#suppressRecovery = false;
     }
   }
 
   async #hydrateExecutionState(): Promise<void> {
     try {
-      const registers = await this.getRegisters(['PC']);
+      const registers = await this.#client.getRegisters();
       if (registers.registers.length > 0) {
         this.#executionState = 'stopped_in_monitor';
         this.#lastStopReason = 'monitor_entry';
         return;
       }
     } catch {
-      this.#warnings.push(selectWarning('Could not determine initial execution state', 'execution_state_unknown'));
+      this.#warnings.push(makeWarning('Could not determine initial execution state', 'execution_state_unknown'));
     }
+
     this.#executionState = 'unknown';
   }
 
@@ -1005,6 +1148,48 @@ export class ViceSessionService {
     if (start < 0 || end > 0xffff) {
       validationError('Address range must fit in 16-bit address space', { start, end });
     }
+  }
+
+  #mapC64Registers(
+    metadata: Array<{ id: number; size: number; name: string }>,
+    values: Array<{ id: number; value: number }>,
+  ): C64RegisterValues {
+    const metadataByName = new Map(metadata.map((item) => [item.name.toUpperCase(), item]));
+    const valuesById = new Map(values.map((item) => [item.id, item.value]));
+
+    return Object.fromEntries(
+      C64_REGISTER_DEFINITIONS.map((definition) => {
+        const meta = metadataByName.get(definition.viceName.toUpperCase());
+        if (!meta) {
+          validationError(`Required C64 register is missing from VICE: ${definition.viceName}`, {
+            registerName: definition.fieldName,
+            viceName: definition.viceName,
+          });
+        }
+        const value = valuesById.get(meta.id);
+        if (value == null) {
+          validationError(`Required C64 register value is missing from VICE: ${definition.viceName}`, {
+            registerName: definition.fieldName,
+            viceName: definition.viceName,
+          });
+        }
+        return [definition.fieldName, value];
+      }),
+    ) as C64RegisterValues;
+  }
+
+  #getC64RegisterMetadata(): C64RegisterMetadata {
+    return Object.fromEntries(
+      C64_REGISTER_DEFINITIONS.map((definition) => [
+        definition.fieldName,
+        {
+          widthBits: definition.widthBits,
+          min: definition.min,
+          max: definition.max,
+          description: definition.description,
+        },
+      ]),
+    ) as C64RegisterMetadata;
   }
 }
 
@@ -1058,6 +1243,19 @@ async function waitForMonitor(host: string, port: number, timeoutMs: number): Pr
   throw new ViceMcpError('monitor_timeout', `VICE monitor did not open on ${host}:${port}`, 'timeout', true, {
     host,
     port,
-    timeoutMs,
+  });
+}
+
+async function waitForProcessExit(process: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+  if (process.exitCode != null) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Timed out waiting for process exit')), timeoutMs);
+    process.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
 }

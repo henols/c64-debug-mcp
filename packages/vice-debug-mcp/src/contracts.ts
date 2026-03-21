@@ -5,8 +5,7 @@ export const VICE_STX = 0x02;
 export const VICE_BROADCAST_REQUEST_ID = 0xffffffff;
 export const DEFAULT_MONITOR_HOST = '127.0.0.1';
 export const DEFAULT_RESUME_POLICY = 'preserve_pause_state' as const;
-export const DEFAULT_ATTACH_RECONNECT_POLICY = 'never' as const;
-export const DEFAULT_MANAGED_RECONNECT_POLICY = 'managed_only' as const;
+export const DEFAULT_MACHINE_TYPE = 'c64' as const;
 export const DEFAULT_FORBIDDEN_PORTS = new Set([6502]);
 
 export const transportStateSchema = z.enum([
@@ -37,24 +36,37 @@ export const stopReasonSchema = z.enum([
   'error',
   'unknown',
 ]);
-export const reconnectPolicySchema = z.enum(['never', 'always', 'managed_only']);
 export const resumePolicySchema = z.enum(['preserve_pause_state', 'resume_after_mutation', 'always_resume']);
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
 export const memSpaceSchema = z.enum(['main', 'drive8', 'drive9', 'drive10', 'drive11']);
+export const emulatorConfigSchema = z.object({
+  emulatorType: z.string().min(1).default(DEFAULT_MACHINE_TYPE),
+  binaryPath: z.string().optional(),
+  workingDirectory: z.string().optional(),
+  arguments: z.string().optional(),
+  resumePolicy: resumePolicySchema.default(DEFAULT_RESUME_POLICY),
+});
+export const responseMetaSchema = z.object({
+  freshEmulator: z.boolean(),
+  launchId: z.number().int().nonnegative(),
+  restartCount: z.number().int().nonnegative(),
+});
 
 export type TransportState = z.infer<typeof transportStateSchema>;
 export type EmulatorOwnership = z.infer<typeof emulatorOwnershipSchema>;
 export type ProcessState = z.infer<typeof processStateSchema>;
 export type ExecutionState = z.infer<typeof executionStateSchema>;
 export type StopReason = z.infer<typeof stopReasonSchema>;
-export type ReconnectPolicy = z.infer<typeof reconnectPolicySchema>;
 export type ResumePolicy = z.infer<typeof resumePolicySchema>;
 export type BreakpointKind = z.infer<typeof breakpointKindSchema>;
 export type ResetMode = z.infer<typeof resetModeSchema>;
 export type MemSpaceName = z.infer<typeof memSpaceSchema>;
+export type EmulatorConfig = z.infer<typeof emulatorConfigSchema>;
+export type ResponseMeta = z.infer<typeof responseMetaSchema>;
+export type C64RegisterName = 'PC' | 'A' | 'X' | 'Y' | 'SP' | 'FL' | '00' | '01' | 'LIN' | 'CYC';
 
-export interface ToolWarning {
+export interface WarningItem {
   code: string;
   message: string;
 }
@@ -77,13 +89,13 @@ export interface ToolError {
   details?: Record<string, unknown>;
 }
 
-export interface ViceMachineProfile {
+export interface MachineProfile {
   machineType: string;
   cpu: string;
   registerNamespace: string;
 }
 
-export interface SessionSnapshot {
+export interface SessionState {
   sessionId: string | null;
   transportState: TransportState;
   emulatorOwnership: EmulatorOwnership;
@@ -91,19 +103,24 @@ export interface SessionSnapshot {
   executionState: ExecutionState;
   lastStopReason: StopReason;
   machineType: string | null;
-  machineProfile: ViceMachineProfile | null;
+  machineProfile: MachineProfile | null;
   binaryMonitorEndpoint: {
     host: string | null;
     port: number | null;
   };
   activePolicies: {
-    reconnectPolicy: ReconnectPolicy;
     resumePolicy: ResumePolicy;
   };
+  configPresent: boolean;
+  managedByServer: boolean;
+  recoveryInProgress: boolean;
+  launchId: number;
+  restartCount: number;
+  freshEmulatorPending: boolean;
   connectedSince: string | null;
   lastResponseAt: string | null;
   processId: number | null;
-  warnings: ToolWarning[];
+  warnings: WarningItem[];
 }
 
 export interface ProtocolRegisterItem {
@@ -113,7 +130,29 @@ export interface ProtocolRegisterItem {
   value?: number;
 }
 
-export interface BreakpointRecord {
+export interface C64RegisterDefinition {
+  fieldName: C64RegisterName;
+  viceName: string;
+  widthBits: 8 | 16;
+  min: number;
+  max: number;
+  description: string;
+}
+
+export const C64_REGISTER_DEFINITIONS: readonly C64RegisterDefinition[] = [
+  { fieldName: 'PC', viceName: 'PC', widthBits: 16, min: 0, max: 0xffff, description: 'Program counter register' },
+  { fieldName: 'A', viceName: 'A', widthBits: 8, min: 0, max: 0xff, description: 'Accumulator register' },
+  { fieldName: 'X', viceName: 'X', widthBits: 8, min: 0, max: 0xff, description: 'X index register' },
+  { fieldName: 'Y', viceName: 'Y', widthBits: 8, min: 0, max: 0xff, description: 'Y index register' },
+  { fieldName: 'SP', viceName: 'SP', widthBits: 8, min: 0, max: 0xff, description: 'Stack pointer register' },
+  { fieldName: 'FL', viceName: 'FL', widthBits: 8, min: 0, max: 0xff, description: 'CPU flags register' },
+  { fieldName: '00', viceName: '00', widthBits: 8, min: 0, max: 0xff, description: 'Zero-page processor port register 00' },
+  { fieldName: '01', viceName: '01', widthBits: 8, min: 0, max: 0xff, description: 'Zero-page processor port register 01' },
+  { fieldName: 'LIN', viceName: 'LIN', widthBits: 16, min: 0, max: 0xffff, description: 'Current raster line register' },
+  { fieldName: 'CYC', viceName: 'CYC', widthBits: 16, min: 0, max: 0xffff, description: 'Current cycle position register' },
+] as const;
+
+export interface Breakpoint {
   id: number;
   start: number;
   startHex: string;
@@ -130,7 +169,7 @@ export interface BreakpointRecord {
   kind: BreakpointKind;
 }
 
-export interface SymbolRecord {
+export interface SymbolItem {
   name: string;
   address: number;
   addressHex: string;
@@ -141,7 +180,7 @@ export interface SymbolRecord {
   kind: 'function' | 'global' | 'label';
 }
 
-export interface SymbolSourceRecord {
+export interface SymbolSource {
   id: string;
   format: 'oscar64-json' | 'oscar64-asm';
   filePath: string;
@@ -169,9 +208,14 @@ export const sessionStatusSchema = z.object({
     port: z.number().int().nullable(),
   }),
   activePolicies: z.object({
-    reconnectPolicy: reconnectPolicySchema,
     resumePolicy: resumePolicySchema,
   }),
+  configPresent: z.boolean(),
+  managedByServer: z.boolean(),
+  recoveryInProgress: z.boolean(),
+  launchId: z.number().int().nonnegative(),
+  restartCount: z.number().int().nonnegative(),
+  freshEmulatorPending: z.boolean(),
   connectedSince: z.string().nullable(),
   lastResponseAt: z.string().nullable(),
   processId: z.number().int().nullable(),
@@ -271,7 +315,7 @@ export function cpuOperationToBreakpointKind(operation: number): BreakpointKind 
   return 'exec';
 }
 
-export function defaultMachineProfile(machineType: string | null): ViceMachineProfile | null {
+export function defaultMachineProfile(machineType: string | null): MachineProfile | null {
   if (!machineType) {
     return null;
   }

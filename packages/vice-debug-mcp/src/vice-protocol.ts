@@ -10,7 +10,7 @@ import {
   memSpaceToProtocol,
   normalizeHex,
   type BreakpointKind,
-  type BreakpointRecord,
+  type Breakpoint,
 } from './contracts.js';
 import { ViceMcpError } from './errors.js';
 
@@ -136,7 +136,7 @@ export interface ParsedInfoResponse extends ParsedBaseResponse {
 
 export interface ParsedBreakpointInfoResponse extends ParsedBaseResponse {
   type: 'checkpoint_info';
-  checkpoint: BreakpointRecord;
+  checkpoint: Breakpoint;
 }
 
 type ParsedCheckpointInfoResponse = ParsedBreakpointInfoResponse;
@@ -144,7 +144,7 @@ type ParsedCheckpointInfoResponse = ParsedBreakpointInfoResponse;
 export interface ParsedBreakpointListResponse extends ParsedBaseResponse {
   type: 'checkpoint_list';
   total: number;
-  checkpoints: BreakpointRecord[];
+  checkpoints: Breakpoint[];
 }
 
 export interface ParsedBanksAvailableResponse extends ParsedBaseResponse {
@@ -289,7 +289,7 @@ function parseResponse(responseType: number, errorCode: number, requestId: numbe
     }
     case ResponseType.CheckpointInfo: {
       const operation = body[11] ?? 0x04;
-      const checkpoint: BreakpointRecord = {
+      const checkpoint: Breakpoint = {
         id: body.readUInt32LE(0),
         currentlyHit: body[4] === 1,
         start: body.readUInt16LE(5),

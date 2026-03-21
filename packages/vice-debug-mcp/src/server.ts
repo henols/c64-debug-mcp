@@ -3,23 +3,142 @@ import { MCPServer } from '@mastra/mcp';
 import { z } from 'zod';
 
 import {
+  C64_REGISTER_DEFINITIONS,
   breakpointKindSchema,
+  emulatorConfigSchema,
   memSpaceSchema,
-  normalizeHex,
-  parseHexLike,
   resetModeSchema,
-  resumePolicySchema,
+  responseMetaSchema,
   sessionStatusSchema,
 } from './contracts.js';
-import { ViceSessionService } from './session.js';
+import { parseHexLike } from './contracts.js';
+import { ViceSession } from './session.js';
 
-const viceSession = new ViceSessionService();
+const viceSession = new ViceSession();
 
-const sessionStatusTool = createTool({
+const warningSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+
+const breakpointSchema = z.object({
+  id: z.number().int(),
+  start: z.number().int(),
+  startHex: z.string(),
+  end: z.number().int(),
+  endHex: z.string(),
+  memSpace: memSpaceSchema,
+  enabled: z.boolean(),
+  stopWhenHit: z.boolean(),
+  hitCount: z.number().int(),
+  ignoreCount: z.number().int(),
+  currentlyHit: z.boolean(),
+  temporary: z.boolean(),
+  hasCondition: z.boolean(),
+  kind: breakpointKindSchema,
+});
+
+const labeledBreakpointSchema = breakpointSchema.extend({
+  label: z.string().nullable(),
+});
+
+const symbolSchema = z.object({
+  name: z.string(),
+  address: z.number().int(),
+  addressHex: z.string(),
+  endAddress: z.number().int().optional(),
+  endAddressHex: z.string().optional(),
+  source: z.string().optional(),
+  line: z.number().int().optional(),
+  kind: z.enum(['function', 'global', 'label']),
+});
+
+function buildC64RegisterValueSchema() {
+  return z.object(
+    Object.fromEntries(
+      C64_REGISTER_DEFINITIONS.map((register) => [
+        register.fieldName,
+        z.number().int().min(register.min).max(register.max).describe(register.description),
+      ]),
+    ) as Record<string, z.ZodNumber>,
+  );
+}
+
+function buildC64PartialRegisterValueSchema() {
+  return z.object(
+    Object.fromEntries(
+      C64_REGISTER_DEFINITIONS.map((register) => [
+        register.fieldName,
+        z.number().int().min(register.min).max(register.max).describe(register.description).optional(),
+      ]),
+    ) as Record<string, z.ZodOptional<z.ZodNumber>>,
+  );
+}
+
+function buildC64RegisterMetadataSchema() {
+  return z.object(
+    Object.fromEntries(
+      C64_REGISTER_DEFINITIONS.map((register) => [
+        register.fieldName,
+        z.object({
+          widthBits: z.literal(register.widthBits),
+          min: z.literal(register.min),
+          max: z.literal(register.max),
+          description: z.literal(register.description),
+        }),
+      ]),
+    ) as Record<string, z.ZodObject<any>>,
+  );
+}
+
+const c64RegisterValueSchema = buildC64RegisterValueSchema();
+const c64PartialRegisterValueSchema = buildC64PartialRegisterValueSchema();
+const c64RegisterMetadataSchema = buildC64RegisterMetadataSchema();
+const address16Schema = z.number().int().min(0).max(0xffff);
+
+function toolOutputSchema<T extends z.ZodTypeAny>(dataSchema: T) {
+  return z.object({
+    meta: responseMetaSchema,
+    data: dataSchema,
+  });
+}
+
+function createViceTool<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny>(options: {
+  id: string;
+  description: string;
+  inputSchema?: TInput;
+  dataSchema: TOutput;
+  execute: (input: z.infer<TInput>) => Promise<z.infer<TOutput>> | z.infer<TOutput>;
+  mcp?: {
+    annotations?: {
+      title?: string;
+      readOnlyHint?: boolean;
+      destructiveHint?: boolean;
+      idempotentHint?: boolean;
+      openWorldHint?: boolean;
+    };
+  };
+}) {
+  return createTool({
+    id: options.id,
+    description: options.description,
+    ...(options.inputSchema ? { inputSchema: options.inputSchema } : {}),
+    outputSchema: toolOutputSchema(options.dataSchema),
+    mcp: options.mcp,
+    execute: async (input) => {
+      const data = await options.execute(input as z.infer<TInput>);
+      return {
+        meta: viceSession.takeResponseMeta(),
+        data,
+      };
+    },
+  });
+}
+
+const sessionStatusTool = createViceTool({
   id: 'session_status',
-  description: 'Returns explicit VICE session, transport, process, and execution state.',
-  inputSchema: z.object({}),
-  outputSchema: sessionStatusSchema,
+  description: 'Returns explicit VICE session, process, recovery, and execution state.',
+  dataSchema: sessionStatusSchema,
   mcp: {
     annotations: {
       title: 'Session Status',
@@ -32,457 +151,206 @@ const sessionStatusTool = createTool({
   execute: async () => viceSession.snapshot(),
 });
 
-const attachSessionTool = createTool({
-  id: 'attach_session',
-  description: 'Connects to an already-running VICE binary monitor endpoint. Requires an explicit host and port.',
-  inputSchema: z.object({
-    host: z.string().default('127.0.0.1'),
-    port: z.number().int().min(1).max(65535),
-    machineType: z.string().optional(),
+const setEmulatorConfigTool = createViceTool({
+  id: 'set_emulator_config',
+  description: 'Sets the managed emulator config and immediately launches or relaunches the emulator.',
+  inputSchema: emulatorConfigSchema,
+  dataSchema: z.object({
+    config: emulatorConfigSchema,
+    session: sessionStatusSchema,
   }),
-  outputSchema: sessionStatusSchema,
-  execute: async (input) => await viceSession.attachSession(input.host ?? '127.0.0.1', input.port, input.machineType),
+  execute: async (input) => await viceSession.setEmulatorConfig(input),
 });
 
-const startEmulatorTool = createTool({
-  id: 'start_emulator',
-  description:
-    'Starts a managed VICE emulator on a non-default binary monitor port. If monitorPort is omitted, a safe non-default port is allocated automatically.',
-  inputSchema: z.object({
-    emulatorType: z.string().default('x64sc'),
-    binaryPath: z.string().optional(),
-    arguments: z.string().optional(),
-    workingDirectory: z.string().optional(),
-    monitorHost: z.string().default('127.0.0.1'),
-    monitorPort: z.number().int().min(1).max(65535).optional(),
+const getEmulatorConfigTool = createViceTool({
+  id: 'get_emulator_config',
+  description: 'Returns the current managed emulator config.',
+  dataSchema: z.object({
+    config: emulatorConfigSchema.nullable(),
   }),
-  outputSchema: sessionStatusSchema,
-  execute: async (input) =>
-    await viceSession.startEmulator({
-      emulatorType: input.emulatorType ?? 'x64sc',
-      binaryPath: input.binaryPath,
-      arguments: input.arguments,
-      workingDirectory: input.workingDirectory,
-      monitorHost: input.monitorHost ?? '127.0.0.1',
-      monitorPort: input.monitorPort,
-    }),
+  execute: async () => viceSession.getEmulatorConfig(),
 });
 
-const stopEmulatorTool = createTool({
-  id: 'stop_emulator',
-  description: 'Stops the managed VICE emulator process owned by this session.',
-  inputSchema: z.object({
-    force: z.boolean().default(false),
+const resetConfigTool = createViceTool({
+  id: 'reset_config',
+  description: 'Clears the managed emulator config and terminates the current emulator instance.',
+  dataSchema: z.object({
+    cleared: z.boolean(),
+    hadConfig: z.boolean(),
+    session: sessionStatusSchema,
   }),
-  outputSchema:
-    z.object({
-      stopped: z.boolean(),
-      processId: z.number().int().nullable(),
-      ownership: z.enum(['external', 'managed', 'unknown']),
-    }),
-  execute: async (input) => await viceSession.stopEmulator(input.force),
+  execute: async () => await viceSession.resetConfig(),
 });
 
-const disconnectSessionTool = createTool({
-  id: 'disconnect_session',
-  description: 'Disconnects the MCP server from the current VICE monitor session without guessing a new endpoint.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      disconnected: z.boolean(),
-      sessionId: z.string().nullable(),
-    }),
-  execute: async () => await viceSession.disconnectSession(),
-});
-
-const setResumePolicyTool = createTool({
-  id: 'set_resume_policy',
-  description: 'Sets the explicit resume policy used after mutating debugger operations.',
-  inputSchema: z.object({
-    resumePolicy: resumePolicySchema,
-  }),
-  outputSchema:
-    z.object({
-      resumePolicy: resumePolicySchema,
-    }),
-  execute: async (input) => viceSession.setResumePolicy(input.resumePolicy),
-});
-
-const getRegistersTool = createTool({
+const getRegistersTool = createViceTool({
   id: 'get_registers',
-  description: 'Returns symbolic register names, widths, and values.',
-  inputSchema: z.object({
-    registerNames: z.array(z.string()).optional(),
+  description: 'Returns C64 register values as a keyed object.',
+  dataSchema: z.object({
+    machine: z.string(),
+    registers: c64RegisterValueSchema,
   }),
-  outputSchema:
-    z.object({
-      machine: z.string(),
-      registers: z.array(
-        z.object({
-          name: z.string(),
-          id: z.number().int(),
-          widthBits: z.number().int(),
-          value: z.number().int(),
-          valueHex: z.string(),
-        }),
-      ),
-    }),
-  execute: async (input) => await viceSession.getRegisters(input.registerNames),
+  execute: async () => await viceSession.getRegisters(),
 });
 
-const getRegisterMetadataTool = createTool({
-  id: 'get_register_metadata',
-  description: 'Returns register metadata for the active machine.',
-  inputSchema: z.object({
-    registerNames: z.array(z.string()).optional(),
-  }),
-  outputSchema:
-    z.object({
-      machine: z.string(),
-      registers: z.array(
-        z.object({
-          name: z.string(),
-          id: z.number().int(),
-          widthBits: z.number().int(),
-        }),
-      ),
-    }),
-  execute: async (input) => await viceSession.getRegisterMetadata(input.registerNames),
-});
-
-const setRegistersTool = createTool({
+const setRegistersTool = createViceTool({
   id: 'set_registers',
-  description: 'Sets one or more registers by symbolic name.',
+  description: 'Sets one or more C64 registers by field name.',
   inputSchema: z.object({
-    registers: z.array(
-      z.object({
-        name: z.string(),
-        valueHex: z.string(),
-      }),
-    ),
+    registers: c64PartialRegisterValueSchema,
   }),
-  outputSchema:
-    z.object({
-      updated: z.array(
-        z.object({
-          name: z.string(),
-          value: z.number().int(),
-          valueHex: z.string(),
-        }),
-      ),
-      executionState: z.string(),
-    }),
+  dataSchema: z.object({
+    updated: c64PartialRegisterValueSchema,
+    executionState: z.string(),
+  }),
   execute: async (input) => await viceSession.setRegisters(input.registers),
 });
 
-const readMemoryTool = createTool({
+const readMemoryTool = createViceTool({
   id: 'read_memory',
   description: 'Reads an inclusive memory range and returns raw bytes as a JSON array.',
-  inputSchema: z.object({
-    start: z.string(),
-    end: z.string(),
-    bank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-  }),
-  outputSchema:
-    z.object({
-      start: z.number().int(),
-      startHex: z.string(),
-      end: z.number().int(),
-      endHex: z.string(),
-      length: z.number().int(),
-      bank: z.number().int(),
-      data: z.array(z.number().int().min(0).max(255)),
+  inputSchema: z
+    .object({
+      address: address16Schema.describe('Start address in the 16-bit C64 address space'),
+      length: z.number().int().positive().max(0xFFFF).describe('Size of the data chunk to read in bytes'),
+    })
+    .refine((input) => input.address + input.length <= 0x10000, {
+      message: 'address + length must stay within the 64K address space',
+      path: ['length'],
     }),
-  execute: async (input) => await viceSession.readMemory(parseHexLike(input.start, 'start'), parseHexLike(input.end, 'end'), input.bank, input.memSpace),
+  dataSchema: z.object({
+    length: z.number().int().min(0).describe('Number of bytes returned'),
+    data: z.array(z.number().int().min(0).max(255)).describe('Raw bytes returned from memory'),
+  }),
+  execute: async (input) => {
+    const result = await viceSession.readMemory(input.address, input.address + input.length - 1);
+    return {
+      length: result.length,
+      data: result.data,
+    };
+  },
 });
 
-const writeMemoryTool = createTool({
+const writeMemoryTool = createViceTool({
   id: 'write_memory',
   description: 'Writes raw byte values into the active VICE memory space.',
-  inputSchema: z.object({
-    start: z.string(),
-    data: z.array(z.number().int().min(0).max(255)),
-    bank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-  }),
-  outputSchema:
-    z.object({
-      start: z.number().int(),
-      startHex: z.string(),
-      length: z.number().int(),
-      bank: z.number().int(),
-      written: z.boolean(),
+  inputSchema: z
+    .object({
+      address: address16Schema.describe('Start address in the 16-bit C64 address space'),
+      data: z.array(z.number().int().min(0).max(255)).min(1).describe('Raw bytes to write into memory'),
+    })
+    .refine((input) => input.address + input.data.length - 1 <= 0xffff, {
+      message: 'address + data.length must stay within the 16-bit address space',
+      path: ['data'],
     }),
-  execute: async (input) => await viceSession.writeMemory(parseHexLike(input.start, 'start'), input.data, input.bank, input.memSpace),
+  dataSchema: z.object({
+    worked: z.boolean().describe('Whether the write operation completed successfully'),
+  }),
+  execute: async (input) => {
+    await viceSession.writeMemory(input.address, input.data);
+    return {
+      worked: true,
+    };
+  },
 });
 
-const searchMemoryTool = createTool({
-  id: 'search_memory',
-  description: 'Searches a memory range for a byte pattern.',
-  inputSchema: z.object({
-    start: z.string(),
-    end: z.string(),
-    pattern: z.array(z.number().int().min(0).max(255)),
-    bank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-    maxResults: z.number().int().positive().default(10),
-  }),
-  outputSchema:
-    z.object({
-      start: z.number().int(),
-      end: z.number().int(),
-      pattern: z.array(z.number().int().min(0).max(255)),
-      bank: z.number().int(),
-      matches: z.array(
-        z.object({
-          address: z.number().int(),
-          addressHex: z.string(),
-          offset: z.number().int(),
-        }),
-      ),
-      truncated: z.boolean(),
-    }),
-  execute: async (input) =>
-    await viceSession.searchMemory(
-      parseHexLike(input.start, 'start'),
-      parseHexLike(input.end, 'end'),
-      input.pattern,
-      input.bank,
-      input.memSpace,
-      input.maxResults,
-    ),
-});
 
-const fillMemoryTool = createTool({
-  id: 'fill_memory',
-  description: 'Fills a memory range by repeating a byte pattern.',
-  inputSchema: z.object({
-    start: z.string(),
-    end: z.string(),
-    pattern: z.array(z.number().int().min(0).max(255)),
-    bank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-  }),
-  outputSchema:
-    z.object({
-      start: z.number().int(),
-      end: z.number().int(),
-      length: z.number().int(),
-      bank: z.number().int(),
-      pattern: z.array(z.number().int().min(0).max(255)),
-    }),
-  execute: async (input) =>
-    await viceSession.fillMemory(parseHexLike(input.start, 'start'), parseHexLike(input.end, 'end'), input.pattern, input.bank, input.memSpace),
-});
-
-const copyMemoryTool = createTool({
-  id: 'copy_memory',
-  description: 'Copies bytes from one memory region to another.',
-  inputSchema: z.object({
-    sourceStart: z.string(),
-    destStart: z.string(),
-    length: z.number().int().positive(),
-    sourceBank: z.number().int().default(0),
-    destBank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-  }),
-  outputSchema:
-    z.object({
-      sourceStart: z.number().int(),
-      destStart: z.number().int(),
-      length: z.number().int(),
-      sourceBank: z.number().int(),
-      destBank: z.number().int(),
-    }),
-  execute: async (input) =>
-    await viceSession.copyMemory(
-      parseHexLike(input.sourceStart, 'sourceStart'),
-      parseHexLike(input.destStart, 'destStart'),
-      input.length,
-      input.sourceBank,
-      input.destBank,
-      input.memSpace,
-    ),
-});
-
-const compareMemoryTool = createTool({
-  id: 'compare_memory',
-  description: 'Compares two memory regions and returns structured differences.',
-  inputSchema: z.object({
-    firstStart: z.string(),
-    secondStart: z.string(),
-    length: z.number().int().positive(),
-    firstBank: z.number().int().default(0),
-    secondBank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-    maxDifferences: z.number().int().positive().default(25),
-  }),
-  outputSchema:
-    z.object({
-      length: z.number().int(),
-      equal: z.boolean(),
-      differences: z.array(
-        z.object({
-          offset: z.number().int(),
-          firstAddress: z.number().int(),
-          secondAddress: z.number().int(),
-          firstValue: z.number().int(),
-          secondValue: z.number().int(),
-        }),
-      ),
-      truncated: z.boolean(),
-    }),
-  execute: async (input) =>
-    await viceSession.compareMemory(
-      parseHexLike(input.firstStart, 'firstStart'),
-      parseHexLike(input.secondStart, 'secondStart'),
-      input.length,
-      input.firstBank,
-      input.secondBank,
-      input.memSpace,
-      input.maxDifferences,
-    ),
-});
-
-const continueExecutionTool = createTool({
+const continueExecutionTool = createViceTool({
   id: 'continue_execution',
   description: 'Continues execution from the current monitor stop.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      executionState: z.string(),
-      lastStopReason: z.string(),
-      warnings: z.array(z.object({ code: z.string(), message: z.string() })),
-    }),
+  dataSchema: z.object({
+    executionState: z.string(),
+    lastStopReason: z.string(),
+    warnings: z.array(warningSchema),
+  }),
   execute: async () => await viceSession.continueExecution(),
 });
 
-const stepInstructionTool = createTool({
+const stepInstructionTool = createViceTool({
   id: 'step_instruction',
   description: 'Steps forward by one or more instructions.',
   inputSchema: z.object({
     count: z.number().int().positive().default(1),
   }),
-  outputSchema:
-    z.object({
-      executionState: z.string(),
-      lastStopReason: z.string(),
-      programCounter: z.number().int().nullable(),
-      programCounterHex: z.string().nullable(),
-      stepsExecuted: z.number().int(),
-      warnings: z.array(z.object({ code: z.string(), message: z.string() })),
-    }),
+  dataSchema: z.object({
+    executionState: z.string(),
+    lastStopReason: z.string(),
+    programCounter: z.number().int().nullable(),
+    programCounterHex: z.string().nullable(),
+    stepsExecuted: z.number().int(),
+    warnings: z.array(warningSchema),
+  }),
   execute: async (input) => await viceSession.stepInstruction(input.count, false),
 });
 
-const stepOverTool = createTool({
+const stepOverTool = createViceTool({
   id: 'step_over',
   description: 'Steps over the current instruction or subroutine call.',
   inputSchema: z.object({
     count: z.number().int().positive().default(1),
   }),
-  outputSchema:
-    z.object({
-      executionState: z.string(),
-      lastStopReason: z.string(),
-      programCounter: z.number().int().nullable(),
-      programCounterHex: z.string().nullable(),
-      stepsExecuted: z.number().int(),
-      warnings: z.array(z.object({ code: z.string(), message: z.string() })),
-    }),
+  dataSchema: z.object({
+    executionState: z.string(),
+    lastStopReason: z.string(),
+    programCounter: z.number().int().nullable(),
+    programCounterHex: z.string().nullable(),
+    stepsExecuted: z.number().int(),
+    warnings: z.array(warningSchema),
+  }),
   execute: async (input) => await viceSession.stepInstruction(input.count, true),
 });
 
-const stepOutTool = createTool({
+const stepOutTool = createViceTool({
   id: 'step_out',
   description: 'Runs until the current subroutine returns.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      executionState: z.string(),
-      lastStopReason: z.string(),
-      programCounter: z.number().int().nullable(),
-      programCounterHex: z.string().nullable(),
-      warnings: z.array(z.object({ code: z.string(), message: z.string() })),
-    }),
+  dataSchema: z.object({
+    executionState: z.string(),
+    lastStopReason: z.string(),
+    programCounter: z.number().int().nullable(),
+    programCounterHex: z.string().nullable(),
+    warnings: z.array(warningSchema),
+  }),
   execute: async () => await viceSession.stepOut(),
 });
 
-const resetMachineTool = createTool({
+const resetMachineTool = createViceTool({
   id: 'reset_machine',
-  description: 'Resets the machine and leaves lifecycle state explicit.',
+  description: 'Resets the machine.',
   inputSchema: z.object({
     mode: resetModeSchema.default('soft'),
   }),
-  outputSchema:
-    z.object({
-      executionState: z.string(),
-      lastStopReason: z.string(),
-      warnings: z.array(z.object({ code: z.string(), message: z.string() })),
-    }),
+  dataSchema: z.object({
+    executionState: z.string(),
+    lastStopReason: z.string(),
+    warnings: z.array(warningSchema),
+  }),
   execute: async (input) => await viceSession.resetMachine(input.mode ?? 'soft'),
 });
 
-const listBreakpointsTool = createTool({
+const listBreakpointsTool = createViceTool({
   id: 'list_breakpoints',
   description: 'Lists current breakpoints and watchpoints.',
   inputSchema: z.object({
     includeDisabled: z.boolean().default(true),
   }),
-  outputSchema:
-    z.object({
-      breakpoints: z.array(
-        z.object({
-          id: z.number().int(),
-          start: z.number().int(),
-          startHex: z.string(),
-          end: z.number().int(),
-          endHex: z.string(),
-          memSpace: memSpaceSchema,
-          enabled: z.boolean(),
-          stopWhenHit: z.boolean(),
-          hitCount: z.number().int(),
-          ignoreCount: z.number().int(),
-          currentlyHit: z.boolean(),
-          temporary: z.boolean(),
-          hasCondition: z.boolean(),
-          kind: breakpointKindSchema,
-        }),
-      ),
-    }),
+  dataSchema: z.object({
+    breakpoints: z.array(breakpointSchema),
+  }),
   execute: async (input) => await viceSession.listBreakpoints(input.includeDisabled),
 });
 
-const getBreakpointTool = createTool({
+const getBreakpointTool = createViceTool({
   id: 'get_breakpoint',
   description: 'Returns a single breakpoint or watchpoint by numeric id.',
   inputSchema: z.object({
     breakpointId: z.number().int().nonnegative(),
   }),
-  outputSchema:
-    z.object({
-      breakpoint: z.object({
-        id: z.number().int(),
-        start: z.number().int(),
-        startHex: z.string(),
-        end: z.number().int(),
-        endHex: z.string(),
-        memSpace: memSpaceSchema,
-        enabled: z.boolean(),
-        stopWhenHit: z.boolean(),
-        hitCount: z.number().int(),
-        ignoreCount: z.number().int(),
-        currentlyHit: z.boolean(),
-        temporary: z.boolean(),
-        hasCondition: z.boolean(),
-        kind: breakpointKindSchema,
-      }),
-    }),
+  dataSchema: z.object({
+    breakpoint: breakpointSchema,
+  }),
   execute: async (input) => await viceSession.getBreakpoint(input.breakpointId),
 });
 
-const setBreakpointTool = createTool({
+const setBreakpointTool = createViceTool({
   id: 'set_breakpoint',
   description: 'Creates an execution or memory-access breakpoint.',
   inputSchema: z.object({
@@ -495,26 +363,9 @@ const setBreakpointTool = createTool({
     temporary: z.boolean().default(false),
     enabled: z.boolean().default(true),
   }),
-  outputSchema:
-    z.object({
-      breakpoint: z.object({
-        id: z.number().int(),
-        start: z.number().int(),
-        startHex: z.string(),
-        end: z.number().int(),
-        endHex: z.string(),
-        memSpace: memSpaceSchema,
-        enabled: z.boolean(),
-        stopWhenHit: z.boolean(),
-        hitCount: z.number().int(),
-        ignoreCount: z.number().int(),
-        currentlyHit: z.boolean(),
-        temporary: z.boolean(),
-        hasCondition: z.boolean(),
-        kind: breakpointKindSchema,
-        label: z.string().nullable(),
-      }),
-    }),
+  dataSchema: z.object({
+    breakpoint: labeledBreakpointSchema,
+  }),
   execute: async (input) =>
     await viceSession.setBreakpoint({
       kind: input.kind,
@@ -528,49 +379,46 @@ const setBreakpointTool = createTool({
     }),
 });
 
-const deleteBreakpointTool = createTool({
+const deleteBreakpointTool = createViceTool({
   id: 'delete_breakpoint',
   description: 'Deletes a breakpoint by numeric id.',
   inputSchema: z.object({
     breakpointId: z.number().int().nonnegative(),
   }),
-  outputSchema:
-    z.object({
-      deleted: z.boolean(),
-      breakpointId: z.number().int(),
-    }),
+  dataSchema: z.object({
+    deleted: z.boolean(),
+    breakpointId: z.number().int(),
+  }),
   execute: async (input) => await viceSession.deleteBreakpoint(input.breakpointId),
 });
 
-const enableBreakpointTool = createTool({
+const enableBreakpointTool = createViceTool({
   id: 'enable_breakpoint',
   description: 'Enables a breakpoint by id.',
   inputSchema: z.object({
     breakpointId: z.number().int().nonnegative(),
   }),
-  outputSchema:
-    z.object({
-      breakpointId: z.number().int(),
-      enabled: z.boolean(),
-    }),
+  dataSchema: z.object({
+    breakpointId: z.number().int(),
+    enabled: z.boolean(),
+  }),
   execute: async (input) => await viceSession.enableBreakpoint(input.breakpointId, true),
 });
 
-const disableBreakpointTool = createTool({
+const disableBreakpointTool = createViceTool({
   id: 'disable_breakpoint',
   description: 'Disables a breakpoint by id.',
   inputSchema: z.object({
     breakpointId: z.number().int().nonnegative(),
   }),
-  outputSchema:
-    z.object({
-      breakpointId: z.number().int(),
-      enabled: z.boolean(),
-    }),
+  dataSchema: z.object({
+    breakpointId: z.number().int(),
+    enabled: z.boolean(),
+  }),
   execute: async (input) => await viceSession.enableBreakpoint(input.breakpointId, false),
 });
 
-const setWatchpointTool = createTool({
+const setWatchpointTool = createViceTool({
   id: 'set_watchpoint',
   description: 'Creates a read/write watchpoint.',
   inputSchema: z.object({
@@ -581,26 +429,9 @@ const setWatchpointTool = createTool({
     condition: z.string().optional(),
     label: z.string().optional(),
   }),
-  outputSchema:
-    z.object({
-      breakpoint: z.object({
-        id: z.number().int(),
-        start: z.number().int(),
-        startHex: z.string(),
-        end: z.number().int(),
-        endHex: z.string(),
-        memSpace: memSpaceSchema,
-        enabled: z.boolean(),
-        stopWhenHit: z.boolean(),
-        hitCount: z.number().int(),
-        ignoreCount: z.number().int(),
-        currentlyHit: z.boolean(),
-        temporary: z.boolean(),
-        hasCondition: z.boolean(),
-        kind: breakpointKindSchema,
-        label: z.string().nullable(),
-      }),
-    }),
+  dataSchema: z.object({
+    breakpoint: labeledBreakpointSchema,
+  }),
   execute: async (input) =>
     await viceSession.setWatchpoint(
       parseHexLike(input.start, 'start'),
@@ -612,41 +443,39 @@ const setWatchpointTool = createTool({
     ),
 });
 
-const setBreakpointConditionTool = createTool({
+const setBreakpointConditionTool = createViceTool({
   id: 'set_breakpoint_condition',
   description: 'Sets a write-only condition string on an existing breakpoint.',
   inputSchema: z.object({
     breakpointId: z.number().int().nonnegative(),
     condition: z.string().min(1),
   }),
-  outputSchema:
-    z.object({
-      breakpointId: z.number().int(),
-      hasCondition: z.boolean(),
-      conditionTrackedByServer: z.boolean(),
-    }),
+  dataSchema: z.object({
+    breakpointId: z.number().int(),
+    hasCondition: z.boolean(),
+    conditionTrackedByServer: z.boolean(),
+  }),
   execute: async (input) => await viceSession.setBreakpointCondition(input.breakpointId, input.condition),
 });
 
-const loadProgramTool = createTool({
+const loadProgramTool = createViceTool({
   id: 'load_program',
   description: 'Loads a PRG into memory using its header load address unless overridden.',
   inputSchema: z.object({
     filePath: z.string(),
     addressHex: z.string().optional(),
   }),
-  outputSchema:
-    z.object({
-      filePath: z.string(),
-      start: z.number().int(),
-      startHex: z.string(),
-      length: z.number().int(),
-      written: z.boolean(),
-    }),
+  dataSchema: z.object({
+    filePath: z.string(),
+    start: z.number().int(),
+    startHex: z.string(),
+    length: z.number().int(),
+    written: z.boolean(),
+  }),
   execute: async (input) => await viceSession.loadProgram(input.filePath, input.addressHex ? parseHexLike(input.addressHex, 'addressHex') : null),
 });
 
-const autostartProgramTool = createTool({
+const autostartProgramTool = createViceTool({
   id: 'autostart_program',
   description: 'Asks VICE to autostart a program file.',
   inputSchema: z.object({
@@ -654,108 +483,61 @@ const autostartProgramTool = createTool({
     runAfterLoading: z.boolean().default(true),
     fileIndex: z.number().int().nonnegative().default(0),
   }),
-  outputSchema:
-    z.object({
-      filePath: z.string(),
-      runAfterLoading: z.boolean(),
-      fileIndex: z.number().int(),
-      executionState: z.string(),
-    }),
+  dataSchema: z.object({
+    filePath: z.string(),
+    runAfterLoading: z.boolean(),
+    fileIndex: z.number().int(),
+    executionState: z.string(),
+  }),
   execute: async (input) => await viceSession.autostartProgram(input.filePath, input.runAfterLoading, input.fileIndex),
 });
 
-const saveMemoryTool = createTool({
-  id: 'save_memory',
-  description: 'Reads memory from VICE and saves it to a host file as raw bytes or a PRG.',
-  inputSchema: z.object({
-    filePath: z.string(),
-    start: z.string(),
-    end: z.string(),
-    asPrg: z.boolean().default(true),
-    bank: z.number().int().default(0),
-    memSpace: memSpaceSchema.default('main'),
-  }),
-  outputSchema:
-    z.object({
-      filePath: z.string(),
-      start: z.number().int(),
-      startHex: z.string(),
-      end: z.number().int(),
-      endHex: z.string(),
-      length: z.number().int(),
-      asPrg: z.boolean(),
-      bank: z.number().int(),
-    }),
-  execute: async (input) =>
-    await viceSession.saveMemory(
-      input.filePath,
-      parseHexLike(input.start, 'start'),
-      parseHexLike(input.end, 'end'),
-      input.asPrg,
-      input.bank,
-      input.memSpace,
-    ),
-});
-
-const loadSymbolsTool = createTool({
+const loadSymbolsTool = createViceTool({
   id: 'load_symbols',
   description: 'Loads Oscar64 symbols from a JSON debug dump or assembly listing.',
   inputSchema: z.object({
     filePath: z.string(),
   }),
-  outputSchema:
-    z.object({
-      id: z.string(),
-      format: z.enum(['oscar64-json', 'oscar64-asm']),
-      filePath: z.string(),
-      symbolCount: z.number().int(),
-      loadedAt: z.string(),
-    }),
+  dataSchema: z.object({
+    id: z.string(),
+    format: z.enum(['oscar64-json', 'oscar64-asm']),
+    filePath: z.string(),
+    symbolCount: z.number().int(),
+    loadedAt: z.string(),
+  }),
   execute: async (input) => await viceSession.loadSymbols(input.filePath),
 });
 
-const listSymbolSourcesTool = createTool({
+const listSymbolSourcesTool = createViceTool({
   id: 'list_symbol_sources',
   description: 'Lists loaded symbol sources.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      sources: z.array(
-        z.object({
-          id: z.string(),
-          format: z.enum(['oscar64-json', 'oscar64-asm']),
-          filePath: z.string(),
-          symbolCount: z.number().int(),
-          loadedAt: z.string(),
-        }),
-      ),
-    }),
+  dataSchema: z.object({
+    sources: z.array(
+      z.object({
+        id: z.string(),
+        format: z.enum(['oscar64-json', 'oscar64-asm']),
+        filePath: z.string(),
+        symbolCount: z.number().int(),
+        loadedAt: z.string(),
+      }),
+    ),
+  }),
   execute: async () => viceSession.listSymbolSources(),
 });
 
-const lookupSymbolTool = createTool({
+const lookupSymbolTool = createViceTool({
   id: 'lookup_symbol',
   description: 'Looks up a loaded symbol by exact name.',
   inputSchema: z.object({
     name: z.string(),
   }),
-  outputSchema:
-    z.object({
-      symbol: z.object({
-        name: z.string(),
-        address: z.number().int(),
-        addressHex: z.string(),
-        endAddress: z.number().int().optional(),
-        endAddressHex: z.string().optional(),
-        source: z.string().optional(),
-        line: z.number().int().optional(),
-        kind: z.enum(['function', 'global', 'label']),
-      }),
-    }),
+  dataSchema: z.object({
+    symbol: symbolSchema,
+  }),
   execute: async (input) => viceSession.lookupSymbol(input.name),
 });
 
-const setBreakpointAtSymbolTool = createTool({
+const setBreakpointAtSymbolTool = createViceTool({
   id: 'set_breakpoint_at_symbol',
   description: 'Resolves a loaded symbol and creates an execution breakpoint at that address.',
   inputSchema: z.object({
@@ -763,110 +545,69 @@ const setBreakpointAtSymbolTool = createTool({
     condition: z.string().optional(),
     temporary: z.boolean().default(false),
   }),
-  outputSchema:
-    z.object({
-      symbol: z.object({
-        name: z.string(),
-        address: z.number().int(),
-        addressHex: z.string(),
-        endAddress: z.number().int().optional(),
-        endAddressHex: z.string().optional(),
-        source: z.string().optional(),
-        line: z.number().int().optional(),
-        kind: z.enum(['function', 'global', 'label']),
-      }),
-      breakpoint: z.object({
-        id: z.number().int(),
-        start: z.number().int(),
-        startHex: z.string(),
-        end: z.number().int(),
-        endHex: z.string(),
-        enabled: z.boolean(),
-        stopWhenHit: z.boolean(),
-        hitCount: z.number().int(),
-        currentlyHit: z.boolean(),
-        temporary: z.boolean(),
-        hasCondition: z.boolean(),
-        kind: breakpointKindSchema,
-        label: z.string().nullable(),
-      }),
-    }),
+  dataSchema: z.object({
+    symbol: symbolSchema,
+    breakpoint: labeledBreakpointSchema,
+  }),
   execute: async (input) => await viceSession.setBreakpointAtSymbol(input.name, input.condition, input.temporary),
 });
 
-const captureDisplayTool = createTool({
+const captureDisplayTool = createViceTool({
   id: 'capture_display',
   description: 'Captures the current display and returns indexed pixel data plus a grayscale PNG fallback.',
   inputSchema: z.object({
     useVic: z.boolean().default(true),
   }),
-  outputSchema:
-    z.object({
-      width: z.number().int(),
-      height: z.number().int(),
-      bitsPerPixel: z.number().int(),
-      debugWidth: z.number().int(),
-      debugHeight: z.number().int(),
-      debugOffsetX: z.number().int(),
-      debugOffsetY: z.number().int(),
-      pixelDataBase64: z.string(),
-      pngBase64: z.string().nullable(),
-      warnings: z.array(z.object({ code: z.string(), message: z.string() })),
-    }),
+  dataSchema: z.object({
+    width: z.number().int(),
+    height: z.number().int(),
+    bitsPerPixel: z.number().int(),
+    debugWidth: z.number().int(),
+    debugHeight: z.number().int(),
+    debugOffsetX: z.number().int(),
+    debugOffsetY: z.number().int(),
+    pixelDataBase64: z.string(),
+    pngBase64: z.string().nullable(),
+    warnings: z.array(warningSchema),
+  }),
   execute: async (input) => await viceSession.captureDisplay(input.useVic),
 });
 
-const getBanksTool = createTool({
+const getBanksTool = createViceTool({
   id: 'get_banks',
   description: 'Lists VICE memory banks.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      banks: z.array(
-        z.object({
-          id: z.number().int(),
-          name: z.string(),
-        }),
-      ),
-    }),
+  dataSchema: z.object({
+    banks: z.array(
+      z.object({
+        id: z.number().int(),
+        name: z.string(),
+      }),
+    ),
+  }),
   execute: async () => await viceSession.getBanks(),
 });
 
-const getInfoTool = createTool({
+const getInfoTool = createViceTool({
   id: 'get_info',
   description: 'Returns VICE version information.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      viceVersion: z.string(),
-      versionComponents: z.array(z.number().int()),
-      svnVersion: z.number().int(),
-    }),
+  dataSchema: z.object({
+    viceVersion: z.string(),
+    versionComponents: z.array(z.number().int()),
+    svnVersion: z.number().int(),
+  }),
   execute: async () => await viceSession.getInfo(),
 });
 
-const pingTool = createTool({
-  id: 'ping',
-  description: 'Checks whether the active VICE monitor is responsive.',
-  inputSchema: z.object({}),
-  outputSchema:
-    z.object({
-      responsive: z.boolean(),
-    }),
-  execute: async () => await viceSession.ping(),
-});
-
-const sendKeysTool = createTool({
+const sendKeysTool = createViceTool({
   id: 'send_keys',
   description: 'Feeds keys into the emulator keyboard buffer.',
   inputSchema: z.object({
     keys: z.string(),
   }),
-  outputSchema:
-    z.object({
-      sent: z.boolean(),
-      length: z.number().int(),
-    }),
+  dataSchema: z.object({
+    sent: z.boolean(),
+    length: z.number().int(),
+  }),
   execute: async (input) => await viceSession.sendKeys(input.keys),
 });
 
@@ -874,25 +615,18 @@ export const viceDebugServer = new MCPServer({
   id: 'vice-debug-mcp',
   name: 'VICE Debug MCP',
   version: '0.1.0',
-  description: 'Structured Mastra MCP server for VICE debugging with explicit lifecycle and non-default managed monitor ports.',
+  description: 'Structured Mastra MCP server for VICE debugging with a config-driven self-healing managed emulator.',
   instructions:
-    'Use attach_session to connect to an existing VICE instance or start_emulator to launch a managed instance on a non-default monitor port. Query session_status rather than inferring lifecycle state from tool side effects.',
+    'Set emulator config first. After that, use debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
   tools: {
     session_status: sessionStatusTool,
-    attach_session: attachSessionTool,
-    start_emulator: startEmulatorTool,
-    stop_emulator: stopEmulatorTool,
-    disconnect_session: disconnectSessionTool,
-    set_resume_policy: setResumePolicyTool,
+    set_emulator_config: setEmulatorConfigTool,
+    get_emulator_config: getEmulatorConfigTool,
+    reset_config: resetConfigTool,
     get_registers: getRegistersTool,
-    get_register_metadata: getRegisterMetadataTool,
     set_registers: setRegistersTool,
     read_memory: readMemoryTool,
     write_memory: writeMemoryTool,
-    search_memory: searchMemoryTool,
-    fill_memory: fillMemoryTool,
-    copy_memory: copyMemoryTool,
-    compare_memory: compareMemoryTool,
     continue_execution: continueExecutionTool,
     step_instruction: stepInstructionTool,
     step_over: stepOverTool,
@@ -908,7 +642,6 @@ export const viceDebugServer = new MCPServer({
     set_breakpoint_condition: setBreakpointConditionTool,
     load_program: loadProgramTool,
     autostart_program: autostartProgramTool,
-    save_memory: saveMemoryTool,
     load_symbols: loadSymbolsTool,
     list_symbol_sources: listSymbolSourcesTool,
     lookup_symbol: lookupSymbolTool,
@@ -916,7 +649,6 @@ export const viceDebugServer = new MCPServer({
     capture_display: captureDisplayTool,
     get_banks: getBanksTool,
     get_info: getInfoTool,
-    ping: pingTool,
     send_keys: sendKeysTool,
   },
 });

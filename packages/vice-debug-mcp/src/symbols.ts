@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { normalizeHex, type SymbolRecord, type SymbolSourceRecord } from './contracts.js';
+import { normalizeHex, type SymbolItem, type SymbolSource } from './contracts.js';
 import { validationError } from './errors.js';
 
 interface Oscar64DebugJson {
@@ -21,14 +21,14 @@ interface Oscar64DebugJson {
 }
 
 interface LoadedSymbolSource {
-  metadata: SymbolSourceRecord;
-  symbols: SymbolRecord[];
+  metadata: SymbolSource;
+  symbols: SymbolItem[];
 }
 
-export class SymbolService {
+export class SymbolStore {
   #sources: LoadedSymbolSource[] = [];
 
-  async loadOscar64Symbols(filePath: string): Promise<SymbolSourceRecord> {
+  async loadOscar64Symbols(filePath: string): Promise<SymbolSource> {
     const absolutePath = path.resolve(filePath);
     const raw = await fs.readFile(absolutePath, 'utf8');
 
@@ -48,11 +48,11 @@ export class SymbolService {
     return parsed.metadata;
   }
 
-  listSources(): SymbolSourceRecord[] {
+  listSources(): SymbolSource[] {
     return this.#sources.map((source) => source.metadata);
   }
 
-  lookup(name: string): SymbolRecord | null {
+  lookup(name: string): SymbolItem | null {
     const normalized = name.trim();
     for (let index = this.#sources.length - 1; index >= 0; index -= 1) {
       const hit = this.#sources[index]!.symbols.find((symbol) => symbol.name === normalized);
@@ -65,7 +65,7 @@ export class SymbolService {
 
   #fromOscar64Json(filePath: string, raw: string): LoadedSymbolSource {
     const parsed = JSON.parse(raw) as Oscar64DebugJson;
-    const symbols: SymbolRecord[] = [];
+    const symbols: SymbolItem[] = [];
 
     for (const fn of parsed.functions ?? []) {
       if (!fn.name) {
@@ -110,7 +110,7 @@ export class SymbolService {
   }
 
   #fromOscar64Asm(filePath: string, raw: string): LoadedSymbolSource {
-    const symbols: SymbolRecord[] = [];
+    const symbols: SymbolItem[] = [];
     const labelPattern = /^\s*([A-Za-z_.$@][\w.$@]*)\s*[:=]\s*\$?([0-9A-Fa-f]{2,4})\b/mg;
 
     for (const match of raw.matchAll(labelPattern)) {
