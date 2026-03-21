@@ -7,7 +7,7 @@ import {
   VICE_STX,
   breakpointKindToOperation,
   cpuOperationToBreakpointKind,
-  memSpaceToProtocol,
+  mainMemSpaceToProtocol,
   type BreakpointKind,
   type Breakpoint,
 } from './contracts.js';
@@ -96,7 +96,6 @@ export type ParsedResponse =
   | ParsedInfoResponse
   | ParsedBreakpointInfoResponse
   | ParsedBreakpointListResponse
-  | ParsedBanksAvailableResponse
   | ParsedDisplayResponse
   | ParsedStoppedEvent
   | ParsedResumedEvent
@@ -148,11 +147,6 @@ export interface ParsedBreakpointListResponse extends ParsedBaseResponse {
   checkpoints: Breakpoint[];
 }
 
-export interface ParsedBanksAvailableResponse extends ParsedBaseResponse {
-  type: 'banks_available';
-  banks: Array<{ id: number; name: string }>;
-}
-
 export interface ParsedDisplayResponse extends ParsedBaseResponse {
   type: 'display';
   debugWidth: number;
@@ -185,21 +179,6 @@ export interface ParsedUndumpResponse extends ParsedBaseResponse {
   programCounter: number;
 }
 
-function protocolToMemSpace(value: number): 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11' {
-  switch (value) {
-    case 0x01:
-      return 'drive8';
-    case 0x02:
-      return 'drive9';
-    case 0x03:
-      return 'drive10';
-    case 0x04:
-      return 'drive11';
-    default:
-      return 'main';
-  }
-}
-
 function parseLittleEndianVariableWidth(bytes: Uint8Array): number {
   let value = 0;
   for (let index = 0; index < bytes.length; index += 1) {
@@ -224,7 +203,7 @@ function parseBuffer(buffer: Buffer): { responses: ParsedResponse[]; remainder: 
 
   while (offset + 12 <= buffer.length) {
     if (buffer[offset] !== VICE_STX) {
-      throw new ViceMcpError('protocol_invalid_stx', 'Invalid response prefix from VICE', 'protocol');
+      throw new ViceMcpError('protocol_invalid_stx', 'Invalid response prefix from emulator debug connection', 'protocol');
     }
 
     const bodyLength = buffer.readUInt32LE(offset + 2);
@@ -295,7 +274,6 @@ function parseResponse(responseType: number, errorCode: number, requestId: numbe
         currentlyHit: body[4] === 1,
         start: body.readUInt16LE(5),
         end: body.readUInt16LE(7),
-        memSpace: protocolToMemSpace(body[22] ?? 0),
         stopWhenHit: body[9] === 1,
         enabled: body[10] === 1,
         kind: cpuOperationToBreakpointKind(operation),
@@ -314,20 +292,6 @@ function parseResponse(responseType: number, errorCode: number, requestId: numbe
         total: errorCode === ErrorCode.OK ? body.readUInt32LE(0) : 0,
         checkpoints: [],
       };
-    }
-    case ResponseType.BanksAvailable: {
-      const count = errorCode === ErrorCode.OK ? body.readUInt16LE(0) : 0;
-      let offset = 2;
-      const banks = [];
-      for (let index = 0; index < count; index += 1) {
-        const itemSize = body[offset]!;
-        const id = body.readUInt16LE(offset + 1);
-        const nameLength = body[offset + 3]!;
-        const name = body.subarray(offset + 4, offset + 4 + nameLength).toString('ascii');
-        banks.push({ id, name });
-        offset += itemSize + 1;
-      }
-      return { type: 'banks_available', requestId, errorCode, banks };
     }
     case ResponseType.DisplayGet: {
       const infoLength = body.readUInt32LE(0);
@@ -404,7 +368,7 @@ export class ViceMonitorClient extends EventEmitter {
   async disconnect(): Promise<void> {
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new ViceMcpError('connection_closed', 'VICE monitor connection closed', 'connection', true));
+      pending.reject(new ViceMcpError('connection_closed', 'Emulator debug connection closed', 'connection', true));
     }
     this.#pending.clear();
 
@@ -428,21 +392,17 @@ export class ViceMonitorClient extends EventEmitter {
     return this.send(CommandType.Info, Buffer.alloc(0));
   }
 
-  async getBanksAvailable(): Promise<ParsedBanksAvailableResponse> {
-    return this.send(CommandType.BanksAvailable, Buffer.alloc(0));
+  async getRegistersAvailable(): Promise<ParsedRegistersAvailableResponse> {
+    return this.send(CommandType.RegistersAvailable, Buffer.from([mainMemSpaceToProtocol()]));
   }
 
-  async getRegistersAvailable(memSpace: 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11' = 'main'): Promise<ParsedRegistersAvailableResponse> {
-    return this.send(CommandType.RegistersAvailable, Buffer.from([memSpaceToProtocol(memSpace)]));
+  async getRegisters(): Promise<ParsedRegistersResponse> {
+    return this.send(CommandType.RegistersGet, Buffer.from([mainMemSpaceToProtocol()]));
   }
 
-  async getRegisters(memSpace: 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11' = 'main'): Promise<ParsedRegistersResponse> {
-    return this.send(CommandType.RegistersGet, Buffer.from([memSpaceToProtocol(memSpace)]));
-  }
-
-  async setRegisters(registers: Array<{ id: number; value: number }>, memSpace: 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11' = 'main'): Promise<ParsedRegistersResponse> {
+  async setRegisters(registers: Array<{ id: number; value: number }>): Promise<ParsedRegistersResponse> {
     const body = Buffer.alloc(3 + registers.length * 4);
-    body[0] = memSpaceToProtocol(memSpace);
+    body[0] = mainMemSpaceToProtocol();
     body.writeUInt16LE(registers.length, 1);
     registers.forEach((register, index) => {
       const offset = 3 + index * 4;
@@ -453,22 +413,22 @@ export class ViceMonitorClient extends EventEmitter {
     return this.send(CommandType.RegistersSet, body);
   }
 
-  async readMemory(start: number, end: number, memSpace: 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11' = 'main', bankId = 0): Promise<ParsedMemoryGetResponse> {
+  async readMemory(start: number, end: number, bankId = 0): Promise<ParsedMemoryGetResponse> {
     const body = Buffer.alloc(8);
     body[0] = 0;
     body.writeUInt16LE(start, 1);
     body.writeUInt16LE(end, 3);
-    body[5] = memSpaceToProtocol(memSpace);
+    body[5] = mainMemSpaceToProtocol();
     body.writeUInt16LE(bankId, 6);
     return this.send(CommandType.MemoryGet, body);
   }
 
-  async writeMemory(start: number, bytes: Uint8Array, memSpace: 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11' = 'main', bankId = 0): Promise<ParsedEmptyResponse> {
+  async writeMemory(start: number, bytes: Uint8Array, bankId = 0): Promise<ParsedEmptyResponse> {
     const body = Buffer.alloc(8 + bytes.length);
     body[0] = 0;
     body.writeUInt16LE(start, 1);
     body.writeUInt16LE(start + bytes.length - 1, 3);
-    body[5] = memSpaceToProtocol(memSpace);
+    body[5] = mainMemSpaceToProtocol();
     body.writeUInt16LE(bankId, 6);
     Buffer.from(bytes).copy(body, 8);
     return this.send(CommandType.MemorySet, body);
@@ -498,23 +458,18 @@ export class ViceMonitorClient extends EventEmitter {
     start: number;
     end?: number;
     kind: BreakpointKind;
-    memSpace?: 'main' | 'drive8' | 'drive9' | 'drive10' | 'drive11';
     enabled?: boolean;
     stopWhenHit?: boolean;
     temporary?: boolean;
     condition?: string;
   }): Promise<ParsedBreakpointInfoResponse> {
-    const includeMemSpace = options.memSpace != null && options.memSpace !== 'main';
-    const body = Buffer.alloc(includeMemSpace ? 9 : 8);
+    const body = Buffer.alloc(8);
     body.writeUInt16LE(options.start, 0);
     body.writeUInt16LE(options.end ?? options.start, 2);
     body[4] = options.stopWhenHit === false ? 0 : 1;
     body[5] = options.enabled === false ? 0 : 1;
     body[6] = breakpointKindToOperation(options.kind);
     body[7] = options.temporary ? 1 : 0;
-    if (includeMemSpace) {
-      body[8] = memSpaceToProtocol(options.memSpace!);
-    }
 
     const response = await this.send(CommandType.CheckpointSet, body);
     if (options.condition && response.type === 'checkpoint_info') {
@@ -610,7 +565,7 @@ export class ViceMonitorClient extends EventEmitter {
 
   async #execute<T extends ParsedResponse>(commandType: CommandType, body: Buffer, timeoutMs: number): Promise<T> {
     if (!this.#socket || this.#socket.destroyed) {
-      throw new ViceMcpError('not_connected', 'VICE monitor is not connected', 'connection', true);
+      throw new ViceMcpError('not_connected', 'Emulator debug connection is not connected', 'connection', true);
     }
 
     const requestId = this.#nextRequestId++;
@@ -619,7 +574,7 @@ export class ViceMonitorClient extends EventEmitter {
     return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(requestId);
-        reject(new ViceMcpError('timeout', `VICE command timed out (0x${commandType.toString(16)})`, 'timeout', true));
+        reject(new ViceMcpError('timeout', `Emulator debug command timed out (0x${commandType.toString(16)})`, 'timeout', true));
       }, timeoutMs);
 
       this.#pending.set(requestId, {
@@ -668,10 +623,10 @@ export class ViceMonitorClient extends EventEmitter {
 
       if (response.errorCode !== ErrorCode.OK) {
         pending.reject(
-          new ViceMcpError('vice_protocol_error', `VICE returned error ${response.errorCode}`, 'protocol', false, {
+          new ViceMcpError('emulator_protocol_error', `Emulator returned error ${response.errorCode}`, 'protocol', false, {
             commandType: pending.type,
             requestId: response.requestId,
-            viceErrorCode: response.errorCode,
+            emulatorErrorCode: response.errorCode,
           }),
         );
         continue;
@@ -686,7 +641,7 @@ export class ViceMonitorClient extends EventEmitter {
   }
 
   #onClose(): void {
-    const pendingError = new ViceMcpError('connection_closed', 'VICE monitor connection closed', 'connection', true);
+    const pendingError = new ViceMcpError('connection_closed', 'Emulator debug connection closed', 'connection', true);
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(pendingError);

@@ -82,7 +82,7 @@ export const keyboardInputResultSchema = z.object({
   key: z.string().describe('Normalized symbolic key name'),
   applied: z.boolean().describe('Whether the request was accepted and applied'),
   held: z.boolean().describe('Whether the key is still treated as held after this request'),
-  mode: z.enum(['buffered_text', 'buffered_text_repeat']).describe('Keyboard delivery mode supported by the VICE protocol'),
+  mode: z.enum(['buffered_text', 'buffered_text_repeat']).describe('Keyboard delivery mode supported by the emulator debug connection'),
 });
 
 export const joystickInputResultSchema = z.object({

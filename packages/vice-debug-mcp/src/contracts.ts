@@ -4,7 +4,8 @@ export const VICE_API_VERSION = 0x02;
 export const VICE_STX = 0x02;
 export const VICE_BROADCAST_REQUEST_ID = 0xffffffff;
 export const DEFAULT_MONITOR_HOST = '127.0.0.1';
-export const DEFAULT_MACHINE_TYPE = 'c64' as const;
+export const C64_TARGET = 'c64' as const;
+export const DEFAULT_C64_BINARY = 'x64sc' as const;
 export const DEFAULT_FORBIDDEN_PORTS = new Set([6502]);
 
 export const transportStateSchema = z.enum([
@@ -37,7 +38,6 @@ export const stopReasonSchema = z.enum([
 export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready', 'recovering', 'stopped', 'error']);
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
-export const memSpaceSchema = z.enum(['main', 'drive8', 'drive9', 'drive10', 'drive11']);
 export const programLoadModeSchema = z.enum(['memory', 'autostart']);
 export const inputActionSchema = z.enum(['press', 'release', 'tap']);
 export const joystickControlSchema = z.enum(['up', 'down', 'left', 'right', 'fire']);
@@ -58,8 +58,7 @@ export const warningItemSchema = z.object({
   code: z.string(),
   message: z.string(),
 });
-export const emulatorConfigSchema = z.object({
-  emulatorType: z.string().min(1).default(DEFAULT_MACHINE_TYPE),
+export const c64ConfigSchema = z.object({
   binaryPath: z.string().optional(),
   workingDirectory: z.string().optional(),
   arguments: z.string().optional(),
@@ -77,12 +76,11 @@ export type StopReason = z.infer<typeof stopReasonSchema>;
 export type SessionHealth = z.infer<typeof sessionHealthSchema>;
 export type BreakpointKind = z.infer<typeof breakpointKindSchema>;
 export type ResetMode = z.infer<typeof resetModeSchema>;
-export type MemSpaceName = z.infer<typeof memSpaceSchema>;
 export type ProgramLoadMode = z.infer<typeof programLoadModeSchema>;
 export type InputAction = z.infer<typeof inputActionSchema>;
 export type JoystickControl = z.infer<typeof joystickControlSchema>;
 export type JoystickPort = z.infer<typeof joystickPortSchema>;
-export type EmulatorConfig = z.infer<typeof emulatorConfigSchema>;
+export type C64Config = z.infer<typeof c64ConfigSchema>;
 export type ResponseMeta = z.infer<typeof responseMetaSchema>;
 export type C64RegisterName = 'PC' | 'A' | 'X' | 'Y' | 'SP' | 'FL' | '00' | '01' | 'LIN' | 'CYC';
 
@@ -114,7 +112,6 @@ export interface SessionState {
   processState: ProcessState;
   executionState: ExecutionState;
   lastStopReason: StopReason;
-  machineType: string | null;
   recoveryInProgress: boolean;
   launchId: number;
   restartCount: number;
@@ -128,7 +125,7 @@ export interface SessionState {
 export interface SessionStatus {
   configured: boolean;
   status: SessionHealth;
-  machineType: string | null;
+  target: typeof C64_TARGET;
   warnings: WarningItem[];
 }
 
@@ -165,7 +162,6 @@ export interface Breakpoint {
   id: number;
   start: number;
   end: number;
-  memSpace: MemSpaceName;
   enabled: boolean;
   stopWhenHit: boolean;
   hitCount: number;
@@ -176,10 +172,10 @@ export interface Breakpoint {
   kind: BreakpointKind;
 }
 
-export const emulatorStatusSchema = z.object({
+export const c64StatusSchema = z.object({
   configured: z.boolean(),
   status: sessionHealthSchema,
-  machineType: z.string().nullable(),
+  target: z.literal(C64_TARGET),
   warnings: z.array(warningItemSchema),
 });
 
@@ -191,19 +187,8 @@ export const toolErrorSchema = z.object({
   details: z.record(z.unknown()).optional(),
 });
 
-export function memSpaceToProtocol(name: MemSpaceName): number {
-  switch (name) {
-    case 'main':
-      return 0x00;
-    case 'drive8':
-      return 0x01;
-    case 'drive9':
-      return 0x02;
-    case 'drive10':
-      return 0x03;
-    case 'drive11':
-      return 0x04;
-  }
+export function mainMemSpaceToProtocol(): number {
+  return 0x00;
 }
 
 export function breakpointKindToOperation(kind: BreakpointKind): number {

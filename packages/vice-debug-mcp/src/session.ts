@@ -7,18 +7,18 @@ import zlib from 'node:zlib';
 
 import {
   C64_REGISTER_DEFINITIONS,
+  C64_TARGET,
+  DEFAULT_C64_BINARY,
   DEFAULT_FORBIDDEN_PORTS,
-  DEFAULT_MACHINE_TYPE,
   DEFAULT_MONITOR_HOST,
-  emulatorConfigSchema,
+  c64ConfigSchema,
   type SessionHealth,
   type C64RegisterName,
   type BreakpointKind,
-  type EmulatorConfig,
+  type C64Config,
   type InputAction,
   type JoystickControl,
   type JoystickPort,
-  type MemSpaceName,
   type ProgramLoadMode,
   type ResponseMeta,
   type SessionState,
@@ -37,39 +37,15 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function buildMachineType(emulatorType: string | null): string | null {
-  if (!emulatorType) {
-    return null;
-  }
-  if (emulatorType === 'x64sc' || emulatorType === 'x64') {
-    return 'c64';
-  }
-  return emulatorType;
+function defaultC64Config(): C64Config {
+  return c64ConfigSchema.parse({});
 }
 
-function resolveViceBinary(emulatorType: string): string {
-  switch (emulatorType) {
-    case 'c64':
-      return 'x64sc';
-    case 'c128':
-      return 'x128';
-    default:
-      return emulatorType;
-  }
-}
-
-function defaultEmulatorConfig(): EmulatorConfig {
-  return emulatorConfigSchema.parse({
-    emulatorType: DEFAULT_MACHINE_TYPE,
-  });
-}
-
-function normalizeConfig(config: EmulatorConfig): EmulatorConfig {
+function normalizeConfig(config: C64Config): C64Config {
   const trimmedArguments = config.arguments?.trim() || undefined;
   validateManagedLaunchArguments(trimmedArguments);
 
-  return emulatorConfigSchema.parse({
-    emulatorType: config.emulatorType ?? DEFAULT_MACHINE_TYPE,
+  return c64ConfigSchema.parse({
     binaryPath: config.binaryPath?.trim() || undefined,
     workingDirectory: config.workingDirectory?.trim() || undefined,
     arguments: trimmedArguments,
@@ -83,7 +59,7 @@ function validateManagedLaunchArguments(argumentsString: string | undefined): vo
 
   const args = splitCommandLine(argumentsString);
   if (args.includes('-console')) {
-    validationError('Managed emulator sessions must run with a graphical VICE window. Headless console mode is not allowed.', {
+    validationError('Managed emulator sessions must run with a graphical C64 emulator window. Headless console mode is not allowed.', {
       argument: '-console',
     });
   }
@@ -279,7 +255,7 @@ export class PortAllocator {
 
   assertAllowed(port: number): void {
     if (this.#forbiddenPorts.has(port)) {
-      validationError('Standard/default VICE monitor ports are forbidden in managed mode', {
+      validationError('Standard/default debug monitor ports are forbidden in managed mode', {
         port,
         forbiddenPorts: this.forbiddenPorts,
       });
@@ -360,7 +336,6 @@ export class ViceSession {
   #processState: SessionState['processState'] = 'not_applicable';
   #executionState: SessionState['executionState'] = 'unknown';
   #lastStopReason: StopReason = 'none';
-  #machineType: string | null = null;
   #host: string | null = null;
   #port: number | null = null;
   #connectedSince: string | null = null;
@@ -369,7 +344,7 @@ export class ViceSession {
   #warnings: WarningItem[] = [];
   #lastExecutionIntent: StopReason = 'unknown';
   #lastRegisters: C64RegisterValues | null = null;
-  #config: EmulatorConfig | null = null;
+  #config: C64Config | null = null;
   #recoveryInProgress = false;
   #recoveryPromise: Promise<void> | null = null;
   #freshEmulatorPending = false;
@@ -419,7 +394,6 @@ export class ViceSession {
       processState: this.#processState,
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
-      machineType: this.#machineType,
       recoveryInProgress: this.#recoveryInProgress,
       launchId: this.#launchId,
       restartCount: this.#restartCount,
@@ -452,7 +426,7 @@ export class ViceSession {
     return {
       configured,
       status,
-      machineType: this.#machineType,
+      target: C64_TARGET,
       warnings: [...this.#warnings],
     };
   }
@@ -462,13 +436,13 @@ export class ViceSession {
     return await this.#readDebugState();
   }
 
-  getEmulatorConfig(): { config: EmulatorConfig } {
+  getEmulatorConfig(): { config: C64Config } {
     return {
-      config: this.#config ? { ...this.#config } : defaultEmulatorConfig(),
+      config: this.#config ? { ...this.#config } : defaultC64Config(),
     };
   }
 
-  async setEmulatorConfig(config: EmulatorConfig): Promise<{ config: EmulatorConfig; session: SessionStatus }> {
+  async setEmulatorConfig(config: C64Config): Promise<{ config: C64Config; session: SessionStatus }> {
     const nextConfig = normalizeConfig(config);
 
     this.#config = nextConfig;
@@ -489,7 +463,6 @@ export class ViceSession {
     this.#freshEmulatorPending = false;
     this.#recoveryPromise = null;
     this.#recoveryInProgress = false;
-    this.#machineType = null;
     this.#host = null;
     this.#port = null;
     this.#connectedSince = null;
@@ -587,7 +560,7 @@ export class ViceSession {
       }
       const meta = metadataByName.get(definition.viceName.toUpperCase());
       if (!meta) {
-        validationError(`Required C64 register is missing from VICE: ${definition.viceName}`, {
+        validationError(`Required C64 register is missing from the emulator: ${definition.viceName}`, {
           registerName: definition.fieldName,
           viceName: definition.viceName,
         });
@@ -634,17 +607,17 @@ export class ViceSession {
     };
   }
 
-  async readMemory(start: number, end: number, bank = 0, memSpace: MemSpaceName = 'main') {
+  async readMemory(start: number, end: number, bank = 0) {
     await this.#ensurePausedForDebug();
     this.#validateRange(start, end);
-    const response = await this.#client.readMemory(start, end, memSpace, bank);
+    const response = await this.#client.readMemory(start, end, bank);
     return {
       length: response.bytes.length,
       data: Array.from(response.bytes),
     };
   }
 
-  async writeMemory(start: number, data: number[], bank = 0, memSpace: MemSpaceName = 'main') {
+  async writeMemory(start: number, data: number[], bank = 0) {
     await this.#ensurePausedForDebug();
     const bytes = Uint8Array.from(data);
     if (bytes.length === 0) {
@@ -653,7 +626,7 @@ export class ViceSession {
     if (data.some((value) => !Number.isInteger(value) || value < 0 || value > 0xff)) {
       validationError('write_memory data must contain only integer byte values between 0 and 255');
     }
-    await this.#client.writeMemory(start, bytes, memSpace, bank);
+    await this.#client.writeMemory(start, bytes, bank);
     const debugState = await this.#readDebugState();
     return {
       address: start,
@@ -757,7 +730,6 @@ export class ViceSession {
     kind: BreakpointKind;
     start: number;
     end?: number;
-    memSpace?: MemSpaceName;
     condition?: string;
     label?: string;
     temporary?: boolean;
@@ -768,7 +740,6 @@ export class ViceSession {
       start: options.start,
       end: options.end,
       kind: options.kind,
-      memSpace: options.memSpace,
       condition: options.condition,
       temporary: options.temporary,
       enabled: options.enabled,
@@ -910,7 +881,7 @@ export class ViceSession {
       pngBase64 = encodePngGrayscale(response.innerWidth, response.innerHeight, response.imageBytes);
       warnings.push(
         makeWarning(
-          'VICE returned indexed pixel data without palette metadata; pngBase64 uses grayscale mapping of indices.',
+          'The emulator returned indexed pixel data without palette metadata; pngBase64 uses grayscale mapping of indices.',
           'display_palette_unknown',
         ),
       );
@@ -932,21 +903,11 @@ export class ViceSession {
     };
   }
 
-  async getBanks() {
-    await this.#ensureReady();
-    const response = await this.#client.getBanksAvailable();
-    return {
-      banks: response.banks,
-    };
-  }
-
   async getInfo() {
     await this.#ensureReady();
-    const info = await this.#client.getInfo();
+    await this.#client.getInfo();
     return {
-      viceVersion: info.versionString,
-      versionComponents: info.version,
-      svnVersion: info.svnVersion,
+      target: C64_TARGET,
     };
   }
 
@@ -1116,7 +1077,7 @@ export class ViceSession {
     const port = await this.#portAllocator.allocate();
     await this.#portAllocator.ensureFree(port, host);
 
-    const binary = config.binaryPath ?? resolveViceBinary(config.emulatorType);
+    const binary = config.binaryPath ?? DEFAULT_C64_BINARY;
     const args = ['-binarymonitor', '-binarymonitoraddress', `${host}:${port}`];
     if (config.arguments) {
       args.push(...splitCommandLine(config.arguments));
@@ -1124,7 +1085,6 @@ export class ViceSession {
 
     this.#transportState = 'starting';
     this.#processState = 'launching';
-    this.#machineType = buildMachineType(config.emulatorType);
     this.#host = host;
     this.#port = port;
     this.#connectedSince = null;
@@ -1163,9 +1123,9 @@ export class ViceSession {
     }
   }
 
-  #ensureConfig(): EmulatorConfig {
+  #ensureConfig(): C64Config {
     if (!this.#config) {
-      this.#config = defaultEmulatorConfig();
+      this.#config = defaultC64Config();
     }
 
     return this.#config;
@@ -1182,7 +1142,7 @@ export class ViceSession {
       this.#transportState = 'disconnected';
       this.#warnings = [
         ...this.#warnings.filter((warning) => warning.code !== 'process_exit'),
-        makeWarning(`VICE process exited (${code ?? 'null'} / ${signal ?? 'null'})`, 'process_exit'),
+        makeWarning(`C64 emulator process exited (${code ?? 'null'} / ${signal ?? 'null'})`, 'process_exit'),
       ];
 
       if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
@@ -1342,14 +1302,14 @@ export class ViceSession {
       C64_REGISTER_DEFINITIONS.map((definition) => {
         const meta = metadataByName.get(definition.viceName.toUpperCase());
         if (!meta) {
-          validationError(`Required C64 register is missing from VICE: ${definition.viceName}`, {
+          validationError(`Required C64 register is missing from the emulator: ${definition.viceName}`, {
             registerName: definition.fieldName,
             viceName: definition.viceName,
           });
         }
         const value = valuesById.get(meta.id);
         if (value == null) {
-          validationError(`Required C64 register value is missing from VICE: ${definition.viceName}`, {
+          validationError(`Required C64 register value is missing from the emulator: ${definition.viceName}`, {
             registerName: definition.fieldName,
             viceName: definition.viceName,
           });
@@ -1437,7 +1397,7 @@ async function waitForMonitor(host: string, port: number, timeoutMs: number): Pr
     await sleep(100);
   }
 
-  throw new ViceMcpError('monitor_timeout', `VICE monitor did not open on ${host}:${port}`, 'timeout', true, {
+  throw new ViceMcpError('monitor_timeout', `Debugger monitor did not open on ${host}:${port}`, 'timeout', true, {
     host,
     port,
   });

@@ -81,7 +81,7 @@ function publicMessageFor(error: ViceMcpError): string {
     case 'timeout':
       return 'The server could not communicate with the emulator. Try the request again.';
     case 'protocol_invalid_stx':
-    case 'vice_protocol_error':
+    case 'emulator_protocol_error':
       return 'The emulator returned an unexpected debugger response. Try the request again.';
     default:
       switch (error.category) {

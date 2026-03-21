@@ -4,8 +4,9 @@ import { z } from 'zod';
 
 import {
   breakpointKindSchema,
-  emulatorStatusSchema,
-  emulatorConfigSchema,
+  c64StatusSchema,
+  c64ConfigSchema,
+  C64_TARGET,
   executionStateSchema,
   inputActionSchema,
   joystickControlSchema,
@@ -19,7 +20,6 @@ import {
   breakpointSchema,
   byteArraySchema,
   c64PartialRegisterValueSchema,
-  c64RegisterValueSchema,
   debugStateSchema,
   joystickInputResultSchema,
   keyboardInputResultSchema,
@@ -94,9 +94,9 @@ function normalizeBreakpoint(
 
 const getEmulatorStatusTool = createViceTool({
   id: 'get_emulator_status',
-  description: 'Returns emulator configuration and readiness state without debugger details.',
+  description: 'Returns C64 emulator readiness state without debugger details.',
   inputSchema: noInputSchema,
-  dataSchema: emulatorStatusSchema,
+  dataSchema: c64StatusSchema,
   mcp: {
     annotations: {
       title: 'Emulator Status',
@@ -111,33 +111,33 @@ const getEmulatorStatusTool = createViceTool({
 
 const setEmulatorConfigTool = createViceTool({
   id: 'set_emulator_config',
-  description: 'Sets the managed emulator config and immediately launches or relaunches the emulator.',
-  inputSchema: emulatorConfigSchema,
+  description: 'Sets the managed C64 emulator config and immediately launches or relaunches x64sc.',
+  inputSchema: c64ConfigSchema,
   dataSchema: z.object({
-    config: emulatorConfigSchema,
-    session: emulatorStatusSchema,
+    config: c64ConfigSchema,
+    session: c64StatusSchema,
   }),
   execute: async (input) => await viceSession.setEmulatorConfig(input),
 });
 
 const getEmulatorConfigTool = createViceTool({
   id: 'get_emulator_config',
-  description: 'Returns the current managed emulator config.',
+  description: 'Returns the current managed C64 emulator config.',
   inputSchema: noInputSchema,
   dataSchema: z.object({
-    config: emulatorConfigSchema,
+    config: c64ConfigSchema,
   }),
   execute: async () => viceSession.getEmulatorConfig(),
 });
 
 const resetConfigTool = createViceTool({
   id: 'reset_config',
-  description: 'Clears the managed emulator config and terminates the current emulator instance.',
+  description: 'Clears the managed C64 emulator config and terminates the current x64sc instance.',
   inputSchema: noInputSchema,
   dataSchema: z.object({
     cleared: z.boolean(),
     hadConfig: z.boolean(),
-    session: emulatorStatusSchema,
+    session: c64StatusSchema,
   }),
   execute: async () => await viceSession.resetConfig(),
 });
@@ -192,7 +192,7 @@ const readMemoryTool = createViceTool({
 
 const writeMemoryTool = createViceTool({
   id: 'memory_write',
-  description: 'Writes raw byte values into the active VICE memory space.',
+  description: 'Writes raw byte values into the active C64 memory space.',
   inputSchema: z
     .object({
       address: address16Schema.describe('Start address in the 16-bit C64 address space'),
@@ -301,10 +301,10 @@ const breakpointClearTool = createViceTool({
 
 const programLoadTool = createViceTool({
   id: 'program_load',
-  description: 'Loads a program either directly into memory or through VICE autostart.',
+  description: 'Loads a C64 program either directly into memory or through emulator autostart.',
   inputSchema: z.object({
     filePath: z.string(),
-    mode: programLoadModeSchema.describe('Use memory to insert bytes directly or autostart to delegate loading to VICE'),
+    mode: programLoadModeSchema.describe('Use memory to insert bytes directly or autostart to delegate loading to the emulator'),
     address: address16Schema.optional().describe('Optional override load address for memory mode'),
     runAfterLoading: z.boolean().default(true).describe('Whether autostart should immediately run after loading'),
     fileIndex: z.number().int().nonnegative().default(0).describe('Autostart file index inside the image, when applicable'),
@@ -334,29 +334,12 @@ const captureDisplayTool = createViceTool({
   execute: async (input) => await viceSession.captureDisplay(input.useVic),
 });
 
-const getBanksTool = createViceTool({
-  id: 'get_banks',
-  description: 'Lists VICE memory banks.',
-  inputSchema: noInputSchema,
-  dataSchema: z.object({
-    banks: z.array(
-      z.object({
-        id: z.number().int(),
-        name: z.string(),
-      }),
-    ),
-  }),
-  execute: async () => await viceSession.getBanks(),
-});
-
 const getInfoTool = createViceTool({
   id: 'get_info',
-  description: 'Returns VICE version information.',
+  description: 'Returns general C64 debugger information.',
   inputSchema: noInputSchema,
   dataSchema: z.object({
-    viceVersion: z.string(),
-    versionComponents: z.array(z.number().int()),
-    svnVersion: z.number().int(),
+    target: z.literal(C64_TARGET),
   }),
   execute: async () => await viceSession.getInfo(),
 });
@@ -376,7 +359,7 @@ const sendKeysTool = createViceTool({
 
 const keyboardInputTool = createViceTool({
   id: 'keyboard_input',
-  description: 'Applies low-level keyboard-style input using symbolic key names on top of the VICE keyboard buffer.',
+  description: 'Applies low-level keyboard-style input using symbolic key names on top of the emulator keyboard buffer.',
   inputSchema: z.object({
     action: inputActionSchema.describe('Use tap for a single key event or press/release for repeated buffered input'),
     key: z.string().min(1).describe('Single ASCII key or symbolic key name such as SPACE or ENTER'),
@@ -400,12 +383,12 @@ const joystickInputTool = createViceTool({
 });
 
 export const viceDebugServer = new MCPServer({
-  id: 'vice-debug-mcp',
-  name: 'VICE Debug MCP',
+  id: 'c64-debug-mcp',
+  name: 'c64 debugger',
   version: '0.1.0',
-  description: 'Structured Mastra MCP server for VICE debugging with a config-driven self-healing managed emulator.',
+  description: 'Structured Mastra MCP server for C64 debugging through x64sc with a config-driven self-healing managed emulator.',
   instructions:
-    'Set emulator config first. After that, use emulator-native debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
+    'This server is C64-only and always targets x64sc. Set the C64 emulator config first, then use the debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
   tools: {
     get_emulator_status: getEmulatorStatusTool,
     set_emulator_config: setEmulatorConfigTool,
@@ -422,7 +405,6 @@ export const viceDebugServer = new MCPServer({
     breakpoint_clear: breakpointClearTool,
     program_load: programLoadTool,
     capture_display: captureDisplayTool,
-    get_banks: getBanksTool,
     get_info: getInfoTool,
     send_keys: sendKeysTool,
     keyboard_input: keyboardInputTool,
