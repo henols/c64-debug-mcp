@@ -13,7 +13,6 @@ import {
   sessionStatusSchema,
   stopReasonSchema,
 } from './contracts.js';
-import { parseHexLike } from './contracts.js';
 import { ViceSession } from './session.js';
 
 const viceSession = new ViceSession();
@@ -23,21 +22,21 @@ const warningSchema = z.object({
   message: z.string(),
 });
 
+const address16Schema = z.number().int().min(0).max(0xffff);
+
 const breakpointSchema = z.object({
-  id: z.number().int(),
-  start: z.number().int(),
-  startHex: z.string(),
-  end: z.number().int(),
-  endHex: z.string(),
-  memSpace: memSpaceSchema,
-  enabled: z.boolean(),
-  stopWhenHit: z.boolean(),
-  hitCount: z.number().int(),
-  ignoreCount: z.number().int(),
-  currentlyHit: z.boolean(),
-  temporary: z.boolean(),
-  hasCondition: z.boolean(),
-  kind: breakpointKindSchema,
+  id: z.number().int().describe('Breakpoint identifier'),
+  start: address16Schema.describe('Start address of the breakpoint range'),
+  end: address16Schema.describe('End address of the breakpoint range'),
+  memSpace: memSpaceSchema.describe('Target memory space'),
+  enabled: z.boolean().describe('Whether the breakpoint is enabled'),
+  stopWhenHit: z.boolean().describe('Whether execution stops when the breakpoint is hit'),
+  hitCount: z.number().int().describe('Number of times the breakpoint has been hit'),
+  ignoreCount: z.number().int().describe('Number of hits to ignore before stopping'),
+  currentlyHit: z.boolean().describe('Whether the breakpoint is currently hit'),
+  temporary: z.boolean().describe('Whether the breakpoint is temporary'),
+  hasCondition: z.boolean().describe('Whether the breakpoint has a condition expression'),
+  kind: breakpointKindSchema.describe('Breakpoint trigger kind'),
 });
 
 const labeledBreakpointSchema = breakpointSchema.extend({
@@ -45,14 +44,12 @@ const labeledBreakpointSchema = breakpointSchema.extend({
 });
 
 const symbolSchema = z.object({
-  name: z.string(),
-  address: z.number().int(),
-  addressHex: z.string(),
-  endAddress: z.number().int().optional(),
-  endAddressHex: z.string().optional(),
-  source: z.string().optional(),
-  line: z.number().int().optional(),
-  kind: z.enum(['function', 'global', 'label']),
+  name: z.string().describe('Symbol name'),
+  address: address16Schema.describe('Start address of the symbol'),
+  endAddress: address16Schema.optional().describe('Optional end address of the symbol'),
+  source: z.string().optional().describe('Optional source file associated with the symbol'),
+  line: z.number().int().optional().describe('Optional source line associated with the symbol'),
+  kind: z.enum(['function', 'global', 'label']).describe('Symbol kind'),
 });
 
 function buildC64RegisterValueSchema() {
@@ -77,26 +74,8 @@ function buildC64PartialRegisterValueSchema() {
   );
 }
 
-function buildC64RegisterMetadataSchema() {
-  return z.object(
-    Object.fromEntries(
-      C64_REGISTER_DEFINITIONS.map((register) => [
-        register.fieldName,
-        z.object({
-          widthBits: z.literal(register.widthBits),
-          min: z.literal(register.min),
-          max: z.literal(register.max),
-          description: z.literal(register.description),
-        }),
-      ]),
-    ) as Record<string, z.ZodObject<any>>,
-  );
-}
-
 const c64RegisterValueSchema = buildC64RegisterValueSchema();
 const c64PartialRegisterValueSchema = buildC64PartialRegisterValueSchema();
-const c64RegisterMetadataSchema = buildC64RegisterMetadataSchema();
-const address16Schema = z.number().int().min(0).max(0xffff);
 
 function toolOutputSchema<T extends z.ZodTypeAny>(dataSchema: T) {
   return z.object({
@@ -277,7 +256,6 @@ const stepInstructionTool = createViceTool({
     executionState: executionStateSchema,
     lastStopReason: stopReasonSchema,
     programCounter: z.number().int().nullable(),
-    programCounterHex: z.string().nullable(),
     stepsExecuted: z.number().int(),
     warnings: z.array(warningSchema),
   }),
@@ -294,7 +272,6 @@ const stepOverTool = createViceTool({
     executionState: executionStateSchema,
     lastStopReason: stopReasonSchema,
     programCounter: z.number().int().nullable(),
-    programCounterHex: z.string().nullable(),
     stepsExecuted: z.number().int(),
     warnings: z.array(warningSchema),
   }),
@@ -308,7 +285,6 @@ const stepOutTool = createViceTool({
     executionState: executionStateSchema,
     lastStopReason: stopReasonSchema,
     programCounter: z.number().int().nullable(),
-    programCounterHex: z.string().nullable(),
     warnings: z.array(warningSchema),
   }),
   execute: async () => await viceSession.stepOut(),
@@ -357,8 +333,8 @@ const setBreakpointTool = createViceTool({
   description: 'Creates an execution or memory-access breakpoint.',
   inputSchema: z.object({
     kind: breakpointKindSchema,
-    start: z.string(),
-    end: z.string().optional(),
+    start: address16Schema.describe('Start address of the breakpoint range'),
+    end: address16Schema.optional().describe('Optional end address of the breakpoint range'),
     memSpace: memSpaceSchema.default('main'),
     condition: z.string().optional(),
     label: z.string().optional(),
@@ -371,8 +347,8 @@ const setBreakpointTool = createViceTool({
   execute: async (input) =>
     await viceSession.setBreakpoint({
       kind: input.kind,
-      start: parseHexLike(input.start, 'start'),
-      end: input.end ? parseHexLike(input.end, 'end') : undefined,
+      start: input.start,
+      end: input.end,
       memSpace: input.memSpace,
       condition: input.condition,
       label: input.label,
@@ -424,8 +400,8 @@ const setWatchpointTool = createViceTool({
   id: 'set_watchpoint',
   description: 'Creates a read/write watchpoint.',
   inputSchema: z.object({
-    start: z.string(),
-    end: z.string().optional(),
+    start: address16Schema.describe('Start address of the watchpoint range'),
+    end: address16Schema.optional().describe('Optional end address of the watchpoint range'),
     accessKind: z.enum(['read', 'write', 'read_write']),
     memSpace: memSpaceSchema.default('main'),
     condition: z.string().optional(),
@@ -436,8 +412,8 @@ const setWatchpointTool = createViceTool({
   }),
   execute: async (input) =>
     await viceSession.setWatchpoint(
-      parseHexLike(input.start, 'start'),
-      input.end ? parseHexLike(input.end, 'end') : undefined,
+      input.start,
+      input.end,
       input.accessKind,
       input.condition,
       input.label,
@@ -465,16 +441,15 @@ const loadProgramTool = createViceTool({
   description: 'Loads a PRG into memory using its header load address unless overridden.',
   inputSchema: z.object({
     filePath: z.string(),
-    addressHex: z.string().optional(),
+    address: address16Schema.optional().describe('Optional override load address in the 16-bit C64 address space'),
   }),
   dataSchema: z.object({
     filePath: z.string(),
-    start: z.number().int(),
-    startHex: z.string(),
-    length: z.number().int(),
-    written: z.boolean(),
+    start: address16Schema.describe('Load address used for the program'),
+    length: z.number().int().min(0).describe('Number of bytes written'),
+    written: z.boolean().describe('Whether the program was loaded successfully'),
   }),
-  execute: async (input) => await viceSession.loadProgram(input.filePath, input.addressHex ? parseHexLike(input.addressHex, 'addressHex') : null),
+  execute: async (input) => await viceSession.loadProgram(input.filePath, input.address ?? null),
 });
 
 const autostartProgramTool = createViceTool({

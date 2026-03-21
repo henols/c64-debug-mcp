@@ -8,7 +8,6 @@ import {
   breakpointKindToOperation,
   cpuOperationToBreakpointKind,
   memSpaceToProtocol,
-  normalizeHex,
   type BreakpointKind,
   type Breakpoint,
 } from './contracts.js';
@@ -293,9 +292,7 @@ function parseResponse(responseType: number, errorCode: number, requestId: numbe
         id: body.readUInt32LE(0),
         currentlyHit: body[4] === 1,
         start: body.readUInt16LE(5),
-        startHex: normalizeHex(body.readUInt16LE(5)),
         end: body.readUInt16LE(7),
-        endHex: normalizeHex(body.readUInt16LE(7)),
         memSpace: protocolToMemSpace(body[22] ?? 0),
         stopWhenHit: body[9] === 1,
         enabled: body[10] === 1,

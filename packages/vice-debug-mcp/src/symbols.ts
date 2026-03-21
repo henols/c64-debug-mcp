@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { normalizeHex, type SymbolItem, type SymbolSource } from './contracts.js';
+import { type SymbolItem, type SymbolSource } from './contracts.js';
 import { validationError } from './errors.js';
 
 interface Oscar64DebugJson {
@@ -74,9 +74,7 @@ export class SymbolStore {
       symbols.push({
         name: fn.name,
         address: fn.start,
-        addressHex: normalizeHex(fn.start),
         endAddress: fn.end,
-        endAddressHex: fn.end == null ? undefined : normalizeHex(fn.end),
         source: fn.source,
         line: fn.line,
         kind: 'function',
@@ -90,9 +88,7 @@ export class SymbolStore {
       symbols.push({
         name: variable.name,
         address: variable.start,
-        addressHex: normalizeHex(variable.start),
         endAddress: variable.end,
-        endAddressHex: variable.end == null ? undefined : normalizeHex(variable.end),
         kind: 'global',
       });
     }
@@ -119,7 +115,6 @@ export class SymbolStore {
       symbols.push({
         name,
         address,
-        addressHex: normalizeHex(address),
         kind: 'label',
       });
     }

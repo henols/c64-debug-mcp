@@ -13,7 +13,6 @@ import {
   DEFAULT_RESUME_POLICY,
   defaultMachineProfile,
   emulatorConfigSchema,
-  normalizeHex,
   type SessionHealth,
   type C64RegisterName,
   type BreakpointKind,
@@ -505,12 +504,7 @@ export class ViceSession {
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, memSpace, bank);
     return {
-      start,
-      startHex: normalizeHex(start),
-      end,
-      endHex: normalizeHex(end),
       length: response.bytes.length,
-      bank,
       data: Array.from(response.bytes),
     };
   }
@@ -527,10 +521,7 @@ export class ViceSession {
     await this.#client.writeMemory(start, bytes, memSpace, bank);
     this.#applyResumePolicy(true);
     return {
-      start,
-      startHex: normalizeHex(start),
       length: bytes.length,
-      bank,
       written: true,
     };
   }
@@ -547,7 +538,7 @@ export class ViceSession {
       validationError('search_memory pattern must contain only integer byte values between 0 and 255');
     }
 
-    const matches: Array<{ address: number; addressHex: string; offset: number }> = [];
+    const matches: Array<{ address: number; offset: number }> = [];
     for (let offset = 0; offset <= haystack.bytes.length - needle.length; offset += 1) {
       let equal = true;
       for (let index = 0; index < needle.length; index += 1) {
@@ -558,7 +549,7 @@ export class ViceSession {
       }
       if (equal) {
         const address = start + offset;
-        matches.push({ address, addressHex: normalizeHex(address), offset });
+        matches.push({ address, offset });
         if (matches.length >= maxResults) {
           break;
         }
@@ -670,7 +661,6 @@ export class ViceSession {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
       programCounter,
-      programCounterHex: programCounter == null ? null : normalizeHex(programCounter),
       stepsExecuted: count,
       warnings: [] as WarningItem[],
     };
@@ -688,7 +678,6 @@ export class ViceSession {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
       programCounter,
-      programCounterHex: programCounter == null ? null : normalizeHex(programCounter),
       warnings: [] as WarningItem[],
     };
   }
@@ -812,7 +801,6 @@ export class ViceSession {
     return {
       filePath: absolutePath,
       start: loadAddress,
-      startHex: normalizeHex(loadAddress),
       length: bytes.length,
       written: true,
     };
@@ -844,9 +832,7 @@ export class ViceSession {
     return {
       filePath: absolutePath,
       start,
-      startHex: normalizeHex(start),
       end,
-      endHex: normalizeHex(end),
       length: response.bytes.length,
       asPrg,
       bank,

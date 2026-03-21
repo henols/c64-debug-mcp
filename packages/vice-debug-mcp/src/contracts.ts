@@ -166,9 +166,7 @@ export const C64_REGISTER_DEFINITIONS: readonly C64RegisterDefinition[] = [
 export interface Breakpoint {
   id: number;
   start: number;
-  startHex: string;
   end: number;
-  endHex: string;
   memSpace: MemSpaceName;
   enabled: boolean;
   stopWhenHit: boolean;
@@ -183,9 +181,7 @@ export interface Breakpoint {
 export interface SymbolItem {
   name: string;
   address: number;
-  addressHex: string;
   endAddress?: number;
-  endAddressHex?: string;
   source?: string;
   line?: number;
   kind: 'function' | 'global' | 'label';
@@ -226,36 +222,6 @@ export const toolErrorSchema = z.object({
   retryable: z.boolean(),
   details: z.record(z.unknown()).optional(),
 });
-
-export function normalizeHex(value: number, width = 4): string {
-  return `0x${value.toString(16).toUpperCase().padStart(width, '0')}`;
-}
-
-export function parseHexLike(value: string, fieldName: string): number {
-  const normalized = value.trim().toLowerCase().startsWith('0x') ? value.trim().slice(2) : value.trim();
-  if (!/^[0-9a-f]+$/i.test(normalized)) {
-    throw new Error(`${fieldName} must be a hex string`);
-  }
-  return Number.parseInt(normalized, 16);
-}
-
-export function parseOptionalHexLike(value: string | undefined | null, fieldName: string): number | null {
-  if (value == null) {
-    return null;
-  }
-
-  return parseHexLike(value, fieldName);
-}
-
-export function parseByteString(data: string): Uint8Array {
-  const cleaned = data.trim();
-  if (!cleaned) {
-    return new Uint8Array();
-  }
-
-  const parts = cleaned.split(/[\s,-]+/).filter(Boolean);
-  return Uint8Array.from(parts.map((part) => Number.parseInt(part.replace(/^0x/i, ''), 16)));
-}
 
 export function memSpaceToProtocol(name: MemSpaceName): number {
   switch (name) {
