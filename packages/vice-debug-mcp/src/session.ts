@@ -12,7 +12,6 @@ import {
   DEFAULT_FORBIDDEN_PORTS,
   DEFAULT_MONITOR_HOST,
   c64ConfigSchema,
-  type SessionHealth,
   type C64RegisterName,
   type BreakpointKind,
   type C64Config,
@@ -22,7 +21,6 @@ import {
   type ProgramLoadMode,
   type ResponseMeta,
   type SessionState,
-  type SessionStatus,
   type StopReason,
   type WarningItem,
 } from './contracts.js';
@@ -328,6 +326,21 @@ type DebugState = {
   registers: C64RegisterValues;
 };
 
+type BreakpointWithOptionalLabel = {
+  id: number;
+  start: number;
+  end: number;
+  enabled: boolean;
+  stopWhenHit: boolean;
+  hitCount: number;
+  ignoreCount: number;
+  currentlyHit: boolean;
+  temporary: boolean;
+  hasCondition: boolean;
+  kind: BreakpointKind;
+  label?: string | null;
+};
+
 export class ViceSession {
   readonly #client = new ViceMonitorClient();
   readonly #portAllocator: PortAllocator;
@@ -354,6 +367,7 @@ export class ViceSession {
   #shuttingDown = false;
   #heldKeyboardIntervals = new Map<string, NodeJS.Timeout>();
   #heldJoystickMasks = new Map<JoystickPort, number>();
+  #breakpointLabels = new Map<number, string>();
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
@@ -405,82 +419,9 @@ export class ViceSession {
     };
   }
 
-  status(): SessionStatus {
-    const configured = this.#config != null;
-    let status: SessionHealth;
-
-    if (!configured) {
-      status = 'not_configured';
-    } else if (this.#recoveryInProgress || this.#transportState === 'reconnecting') {
-      status = 'recovering';
-    } else if (this.#transportState === 'starting' || this.#transportState === 'waiting_for_monitor' || this.#processState === 'launching') {
-      status = 'starting';
-    } else if (this.#transportState === 'connected' && this.#processState === 'running') {
-      status = 'ready';
-    } else if (this.#transportState === 'faulted' || this.#processState === 'crashed') {
-      status = 'error';
-    } else {
-      status = 'stopped';
-    }
-
-    return {
-      configured,
-      status,
-      target: C64_TARGET,
-      warnings: [...this.#warnings],
-    };
-  }
-
   async getDebugState(): Promise<DebugState> {
     await this.#ensurePausedForDebug();
     return await this.#readDebugState();
-  }
-
-  getEmulatorConfig(): { config: C64Config } {
-    return {
-      config: this.#config ? { ...this.#config } : defaultC64Config(),
-    };
-  }
-
-  async setEmulatorConfig(config: C64Config): Promise<{ config: C64Config; session: SessionStatus }> {
-    const nextConfig = normalizeConfig(config);
-
-    this.#config = nextConfig;
-    this.#warnings = this.#warnings.filter((warning) => !warning.code.startsWith('launch_') && !warning.code.startsWith('process_'));
-
-    await this.#replaceManagedEmulator('config_update');
-
-    return {
-      config: { ...nextConfig },
-      session: this.status(),
-    };
-  }
-
-  async resetConfig(): Promise<{ cleared: boolean; hadConfig: boolean; session: SessionStatus }> {
-    const hadConfig = this.#config != null;
-
-    this.#config = null;
-    this.#freshEmulatorPending = false;
-    this.#recoveryPromise = null;
-    this.#recoveryInProgress = false;
-    this.#host = null;
-    this.#port = null;
-    this.#connectedSince = null;
-    this.#lastStopReason = 'none';
-    this.#executionState = 'unknown';
-    this.#warnings = [];
-    this.#clearHeldInputState();
-
-    await this.#stopManagedProcess(true);
-
-    this.#transportState = 'not_started';
-    this.#processState = 'not_applicable';
-
-    return {
-      cleared: true,
-      hadConfig,
-      session: this.status(),
-    };
   }
 
   async shutdown(): Promise<void> {
@@ -495,6 +436,7 @@ export class ViceSession {
     this.#recoveryInProgress = false;
     this.#freshEmulatorPending = false;
     this.#clearHeldInputState();
+    this.#breakpointLabels.clear();
 
     try {
       await this.#stopManagedProcess(true);
@@ -713,8 +655,11 @@ export class ViceSession {
   async listBreakpoints(includeDisabled = true) {
     await this.#ensurePausedForDebug();
     const response = await this.#client.listBreakpoints();
+    this.#pruneBreakpointLabels(response.checkpoints.map((breakpoint) => breakpoint.id));
     return {
-      breakpoints: response.checkpoints.filter((breakpoint) => (includeDisabled ? true : breakpoint.enabled)),
+      breakpoints: response.checkpoints
+        .filter((breakpoint) => (includeDisabled ? true : breakpoint.enabled))
+        .map((breakpoint) => this.#attachBreakpointLabel(breakpoint)),
     };
   }
 
@@ -722,7 +667,7 @@ export class ViceSession {
     await this.#ensurePausedForDebug();
     const response = await this.#client.getBreakpoint(breakpointId);
     return {
-      breakpoint: response.checkpoint,
+      breakpoint: this.#attachBreakpointLabel(response.checkpoint),
     };
   }
 
@@ -745,12 +690,14 @@ export class ViceSession {
       enabled: options.enabled,
       stopWhenHit: true,
     });
+    if (options.label?.trim()) {
+      this.#breakpointLabels.set(response.checkpoint.id, options.label.trim());
+    } else {
+      this.#breakpointLabels.delete(response.checkpoint.id);
+    }
     const debugState = await this.#readDebugState();
     return {
-      breakpoint: {
-        ...response.checkpoint,
-        label: options.label ?? null,
-      },
+      breakpoint: this.#attachBreakpointLabel(response.checkpoint),
       executionState: debugState.executionState,
       lastStopReason: debugState.lastStopReason,
       programCounter: debugState.programCounter,
@@ -761,6 +708,7 @@ export class ViceSession {
   async deleteBreakpoint(breakpointId: number) {
     await this.#ensurePausedForDebug();
     await this.#client.deleteBreakpoint(breakpointId);
+    this.#breakpointLabels.delete(breakpointId);
     const debugState = await this.#readDebugState();
     return {
       cleared: true,
@@ -860,9 +808,30 @@ export class ViceSession {
   async autostartProgram(filePath: string, runAfterLoading = true, fileIndex = 0) {
     await this.#ensureReady();
     const absolutePath = path.resolve(filePath);
-    await this.#client.autostartProgram(absolutePath, runAfterLoading, fileIndex);
-    this.#executionState = runAfterLoading ? 'running' : 'stopped_in_monitor';
-    this.#lastStopReason = 'none';
+    const previousExecutionState = this.#executionState;
+    const previousStopReason = this.#lastStopReason;
+    const executionEvent = this.#waitForExecutionEvent(1000);
+
+    this.#lastExecutionIntent = runAfterLoading ? 'none' : 'monitor_entry';
+
+    try {
+      await this.#client.autostartProgram(absolutePath, runAfterLoading, fileIndex);
+    } catch (error) {
+      const event = await executionEvent;
+      const accepted = this.#autostartWasAcceptedAfterError(error, event, previousExecutionState, previousStopReason);
+      if (!accepted) {
+        throw error;
+      }
+    }
+
+    const event = await executionEvent;
+    if (event) {
+      this.#applyExecutionEventState(event.type);
+    } else if (this.#executionState === previousExecutionState && this.#lastStopReason === previousStopReason) {
+      this.#executionState = runAfterLoading ? 'running' : 'stopped_in_monitor';
+      this.#lastStopReason = runAfterLoading ? 'none' : 'monitor_entry';
+    }
+
     return {
       filePath: absolutePath,
       runAfterLoading,
@@ -1089,6 +1058,7 @@ export class ViceSession {
     this.#port = port;
     this.#connectedSince = null;
     this.#executionState = 'unknown';
+    this.#breakpointLabels.clear();
 
     const env = await buildViceLaunchEnv();
 
@@ -1171,6 +1141,7 @@ export class ViceSession {
     try {
       this.#clearHeldInputState();
       const processId = this.#process?.pid ?? null;
+      this.#breakpointLabels.clear();
 
       if (this.#client.connected) {
         try {
@@ -1346,6 +1317,74 @@ export class ViceSession {
     }
     this.#heldKeyboardIntervals.clear();
     this.#heldJoystickMasks.clear();
+  }
+
+  #attachBreakpointLabel<T extends BreakpointWithOptionalLabel>(breakpoint: T): T {
+    return {
+      ...breakpoint,
+      label: this.#breakpointLabels.get(breakpoint.id) ?? null,
+    };
+  }
+
+  #pruneBreakpointLabels(activeBreakpointIds: Iterable<number>): void {
+    const active = new Set(activeBreakpointIds);
+    for (const breakpointId of this.#breakpointLabels.keys()) {
+      if (!active.has(breakpointId)) {
+        this.#breakpointLabels.delete(breakpointId);
+      }
+    }
+  }
+
+  #applyExecutionEventState(eventType: 'resumed' | 'stopped' | 'jam'): void {
+    if (eventType === 'resumed') {
+      this.#executionState = 'running';
+      this.#lastStopReason = 'none';
+      return;
+    }
+
+    this.#executionState = 'stopped_in_monitor';
+    this.#lastStopReason = eventType === 'jam' ? 'error' : this.#lastExecutionIntent;
+  }
+
+  async #waitForExecutionEvent(timeoutMs: number): Promise<{ type: 'resumed' | 'stopped' | 'jam' } | null> {
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.#client.off('event', onEvent);
+        resolve(null);
+      }, timeoutMs);
+
+      const onEvent = (event: { type: string }) => {
+        if (event.type !== 'resumed' && event.type !== 'stopped' && event.type !== 'jam') {
+          return;
+        }
+        clearTimeout(timer);
+        this.#client.off('event', onEvent);
+        resolve({ type: event.type });
+      };
+
+      this.#client.on('event', onEvent);
+    });
+  }
+
+  #autostartWasAcceptedAfterError(
+    error: unknown,
+    event: { type: 'resumed' | 'stopped' | 'jam' } | null,
+    previousExecutionState: SessionState['executionState'],
+    previousStopReason: StopReason,
+  ): boolean {
+    if (!(error instanceof ViceMcpError)) {
+      return false;
+    }
+
+    if (!['emulator_protocol_error', 'timeout', 'connection_closed'].includes(error.code)) {
+      return false;
+    }
+
+    if (event) {
+      return true;
+    }
+
+    return this.#executionState !== previousExecutionState || this.#lastStopReason !== previousStopReason;
   }
 
 }

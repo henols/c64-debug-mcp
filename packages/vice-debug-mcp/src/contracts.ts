@@ -122,13 +122,6 @@ export interface SessionState {
   warnings: WarningItem[];
 }
 
-export interface SessionStatus {
-  configured: boolean;
-  status: SessionHealth;
-  target: typeof C64_TARGET;
-  warnings: WarningItem[];
-}
-
 export interface ProtocolRegisterItem {
   id: number;
   name: string;
@@ -171,13 +164,6 @@ export interface Breakpoint {
   hasCondition: boolean;
   kind: BreakpointKind;
 }
-
-export const c64StatusSchema = z.object({
-  configured: z.boolean(),
-  status: sessionHealthSchema,
-  target: z.literal(C64_TARGET),
-  warnings: z.array(warningItemSchema),
-});
 
 export const toolErrorSchema = z.object({
   code: z.string(),

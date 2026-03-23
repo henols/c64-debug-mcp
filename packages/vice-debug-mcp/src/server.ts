@@ -4,8 +4,6 @@ import { z } from 'zod';
 
 import {
   breakpointKindSchema,
-  c64StatusSchema,
-  c64ConfigSchema,
   C64_TARGET,
   executionStateSchema,
   inputActionSchema,
@@ -77,8 +75,8 @@ function normalizeBreakpoint(
     temporary: boolean;
     hasCondition: boolean;
     kind: z.infer<typeof breakpointKindSchema>;
+    label?: string | null;
   },
-  label: string | null = null,
 ) {
   return {
     id: breakpoint.id,
@@ -88,59 +86,9 @@ function normalizeBreakpoint(
     temporary: breakpoint.temporary,
     hasCondition: breakpoint.hasCondition,
     kind: breakpoint.kind,
-    label,
+    label: breakpoint.label ?? null,
   };
 }
-
-const getEmulatorStatusTool = createViceTool({
-  id: 'get_emulator_status',
-  description: 'Returns C64 emulator readiness state without debugger details.',
-  inputSchema: noInputSchema,
-  dataSchema: c64StatusSchema,
-  mcp: {
-    annotations: {
-      title: 'Emulator Status',
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
-    },
-  },
-  execute: async () => viceSession.status(),
-});
-
-const setEmulatorConfigTool = createViceTool({
-  id: 'set_emulator_config',
-  description: 'Sets the managed C64 emulator config and immediately launches or relaunches x64sc.',
-  inputSchema: c64ConfigSchema,
-  dataSchema: z.object({
-    config: c64ConfigSchema,
-    session: c64StatusSchema,
-  }),
-  execute: async (input) => await viceSession.setEmulatorConfig(input),
-});
-
-const getEmulatorConfigTool = createViceTool({
-  id: 'get_emulator_config',
-  description: 'Returns the current managed C64 emulator config.',
-  inputSchema: noInputSchema,
-  dataSchema: z.object({
-    config: c64ConfigSchema,
-  }),
-  execute: async () => viceSession.getEmulatorConfig(),
-});
-
-const resetConfigTool = createViceTool({
-  id: 'reset_config',
-  description: 'Clears the managed C64 emulator config and terminates the current x64sc instance.',
-  inputSchema: noInputSchema,
-  dataSchema: z.object({
-    cleared: z.boolean(),
-    hadConfig: z.boolean(),
-    session: c64StatusSchema,
-  }),
-  execute: async () => await viceSession.resetConfig(),
-});
 
 const getDebugStateTool = createViceTool({
   id: 'get_debug_state',
@@ -277,7 +225,7 @@ const breakpointSetTool = createViceTool({
   execute: async (input) => {
     const result = await viceSession.breakpointSet(input);
     return {
-      breakpoint: normalizeBreakpoint(result.breakpoint, result.breakpoint.label ?? null),
+      breakpoint: normalizeBreakpoint(result.breakpoint),
       executionState: result.executionState,
       lastStopReason: result.lastStopReason,
       programCounter: result.programCounter,
@@ -386,14 +334,10 @@ export const viceDebugServer = new MCPServer({
   id: 'c64-debug-mcp',
   name: 'c64 debugger',
   version: '0.1.0',
-  description: 'Structured Mastra MCP server for C64 debugging through x64sc with a config-driven self-healing managed emulator.',
+  description: 'Structured Mastra MCP server for C64 debugging through x64sc with a self-healing managed emulator.',
   instructions:
-    'This server is C64-only and always targets x64sc. Set the C64 emulator config first, then use the debugger tools normally. The server owns emulator launch, restart, connection recovery, and monitor port management.',
+    'This server is C64-only and always targets x64sc. The server owns emulator launch, restart, connection recovery, and monitor port management; use the debugger tools directly.',
   tools: {
-    get_emulator_status: getEmulatorStatusTool,
-    set_emulator_config: setEmulatorConfigTool,
-    get_emulator_config: getEmulatorConfigTool,
-    reset_config: resetConfigTool,
     get_debug_state: getDebugStateTool,
     set_registers: setRegistersTool,
     memory_read: readMemoryTool,
