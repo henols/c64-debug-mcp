@@ -4,7 +4,6 @@ import { z } from 'zod';
 
 import {
   breakpointKindSchema,
-  C64_TARGET,
   executionStateSchema,
   inputActionSchema,
   joystickControlSchema,
@@ -190,23 +189,6 @@ const listBreakpointsTool = createViceTool({
   },
 });
 
-const getBreakpointTool = createViceTool({
-  id: 'get_breakpoint',
-  description: 'Returns a single breakpoint or watchpoint by numeric id.',
-  inputSchema: z.object({
-    breakpointId: z.number().int().nonnegative(),
-  }),
-  dataSchema: z.object({
-    breakpoint: breakpointSchema,
-  }),
-  execute: async (input) => {
-    const result = await viceSession.getBreakpoint(input.breakpointId);
-    return {
-      breakpoint: normalizeBreakpoint(result.breakpoint),
-    };
-  },
-});
-
 const breakpointSetTool = createViceTool({
   id: 'breakpoint_set',
   description: 'Creates an execution breakpoint or read/write watchpoint.',
@@ -282,27 +264,17 @@ const captureDisplayTool = createViceTool({
   execute: async (input) => await viceSession.captureDisplay(input.useVic),
 });
 
-const getInfoTool = createViceTool({
-  id: 'get_info',
-  description: 'Returns general C64 debugger information.',
-  inputSchema: noInputSchema,
-  dataSchema: z.object({
-    target: z.literal(C64_TARGET),
-  }),
-  execute: async () => await viceSession.getInfo(),
-});
-
-const sendKeysTool = createViceTool({
-  id: 'send_keys',
-  description: 'Feeds keys into the emulator keyboard buffer.',
+const writeTextTool = createViceTool({
+  id: 'write_text',
+  description: 'Writes text to the emulator keyboard buffer, supporting escaped characters like \\n and \\r.',
   inputSchema: z.object({
-    keys: z.string(),
+    text: z.string(),
   }),
   dataSchema: z.object({
     sent: z.boolean(),
     length: z.number().int(),
   }),
-  execute: async (input) => await viceSession.sendKeys(input.keys),
+  execute: async (input) => await viceSession.writeText(input.text),
 });
 
 const keyboardInputTool = createViceTool({
@@ -344,13 +316,11 @@ export const viceDebugServer = new MCPServer({
     memory_write: writeMemoryTool,
     execute: executeTool,
     list_breakpoints: listBreakpointsTool,
-    get_breakpoint: getBreakpointTool,
     breakpoint_set: breakpointSetTool,
     breakpoint_clear: breakpointClearTool,
     program_load: programLoadTool,
     capture_display: captureDisplayTool,
-    get_info: getInfoTool,
-    send_keys: sendKeysTool,
+    write_text: writeTextTool,
     keyboard_input: keyboardInputTool,
     joystick_input: joystickInputTool,
   },

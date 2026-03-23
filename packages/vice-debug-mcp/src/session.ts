@@ -7,7 +7,6 @@ import zlib from 'node:zlib';
 
 import {
   C64_REGISTER_DEFINITIONS,
-  C64_TARGET,
   DEFAULT_C64_BINARY,
   DEFAULT_FORBIDDEN_PORTS,
   DEFAULT_MONITOR_HOST,
@@ -159,6 +158,52 @@ function makeWarning(message: string, code = 'warning'): WarningItem {
   return { code, message };
 }
 
+function parseEscapedText(input: string): string {
+  let result = '';
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index]!;
+    if (char !== '\\') {
+      result += char;
+      continue;
+    }
+
+    const next = input[index + 1];
+    if (next == null) {
+      validationError('write_text received a trailing backslash escape with no character after it');
+    }
+
+    switch (next) {
+      case 'n':
+        result += '\n';
+        break;
+      case 'r':
+        result += '\r';
+        break;
+      case 't':
+        result += '\t';
+        break;
+      case '\\':
+        result += '\\';
+        break;
+      case '"':
+        result += '"';
+        break;
+      case "'":
+        result += "'";
+        break;
+      default:
+        validationError('write_text received an unsupported escape sequence', {
+          escape: `\\${next}`,
+        });
+    }
+
+    index += 1;
+  }
+
+  return result;
+}
+
 function encodePetscii(text: string): Uint8Array {
   const bytes: number[] = [];
   for (const char of text) {
@@ -182,7 +227,10 @@ function encodePetscii(text: string): Uint8Array {
       continue;
     }
 
-    validationError('send_keys only supports ASCII text plus newline for PETSCII encoding', { character: char, codePoint: code });
+    validationError('write_text only supports characters representable in the supported PETSCII subset', {
+      character: char,
+      codePoint: code,
+    });
   }
 
   return Uint8Array.from(bytes);
@@ -663,14 +711,6 @@ export class ViceSession {
     };
   }
 
-  async getBreakpoint(breakpointId: number) {
-    await this.#ensurePausedForDebug();
-    const response = await this.#client.getBreakpoint(breakpointId);
-    return {
-      breakpoint: this.#attachBreakpointLabel(response.checkpoint),
-    };
-  }
-
   async setBreakpoint(options: {
     kind: BreakpointKind;
     start: number;
@@ -872,17 +912,9 @@ export class ViceSession {
     };
   }
 
-  async getInfo() {
+  async writeText(text: string) {
     await this.#ensureReady();
-    await this.#client.getInfo();
-    return {
-      target: C64_TARGET,
-    };
-  }
-
-  async sendKeys(keys: string) {
-    await this.#ensureReady();
-    const encoded = encodePetscii(keys);
+    const encoded = encodePetscii(parseEscapedText(text));
     await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
     return {
       sent: true,
@@ -898,7 +930,7 @@ export class ViceSession {
     switch (action) {
       case 'tap': {
         const duration = clampTapDuration(durationMs);
-        await this.sendKeys(text);
+        await this.writeText(text);
         await sleep(duration);
         return {
           action,
@@ -910,7 +942,7 @@ export class ViceSession {
       }
       case 'press': {
         if (!this.#heldKeyboardIntervals.has(heldKey)) {
-          await this.sendKeys(text);
+          await this.writeText(text);
           const interval = setInterval(() => {
             void this.#client.sendKeys(Buffer.from(encodePetscii(text)).toString('binary')).catch(() => undefined);
           }, DEFAULT_KEYBOARD_REPEAT_MS);
