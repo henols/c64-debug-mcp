@@ -1,14 +1,14 @@
 {
-  "name": "vicemcp-workspace",
+  "name": "c64mcp-workspace",
   "private": true,
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @vicemcp/vice-debug-mcp",
-    "check": "npm run check --workspace @vicemcp/vice-debug-mcp",
-    "dev:http": "npm run dev:http --workspace @vicemcp/vice-debug-mcp",
-    "smoke:http": "npm run smoke:http --workspace @vicemcp/vice-debug-mcp",
-    "smoke:http:dev": "npm run smoke:http:dev --workspace @vicemcp/vice-debug-mcp"
+    "build": "npm run build --workspace @c64mcp/c64-debug-mcp",
+    "check": "npm run check --workspace @c64mcp/c64-debug-mcp",
+    "dev:http": "npm run dev:http --workspace @c64mcp/c64-debug-mcp",
+    "smoke:http": "npm run smoke:http --workspace @c64mcp/c64-debug-mcp",
+    "smoke:http:dev": "npm run smoke:http:dev --workspace @c64mcp/c64-debug-mcp"
   }
 }

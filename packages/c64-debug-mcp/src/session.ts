@@ -558,9 +558,9 @@ const JOYSTICK_CONTROL_BITS: Record<JoystickControl, number> = {
 const JOYSTICK_RELEASED_MASK = 0x1f;
 const DEFAULT_INPUT_TAP_MS = 75;
 const DEFAULT_KEYBOARD_REPEAT_MS = 100;
-const VICE_PROCESS_LOG_PATH = path.join(os.tmpdir(), 'vice-debug-mcp-x64sc.log');
+const VICE_PROCESS_LOG_PATH = path.join(os.tmpdir(), 'c64-debug-mcp-x64sc.log');
 const DISPLAY_CAPTURE_DIR = path.resolve(process.cwd(), '.vice-debug-mcp-artifacts');
-const MIRROR_VICE_LOGS_TO_STDERR = /^(1|true|yes|on)$/i.test(process.env.VICE_DEBUG_CONSOLE_LOGS ?? '');
+const MIRROR_EMULATOR_LOGS_TO_STDERR = /^(1|true|yes|on)$/i.test(process.env.C64_DEBUG_CONSOLE_LOGS ?? '');
 const EXECUTION_EVENT_WAIT_MS = 1000;
 const EXECUTION_SETTLE_DELAY_MS = 2000;
 const BOOTSTRAP_INITIAL_DELAY_MS = 2000;
@@ -1946,14 +1946,14 @@ export class ViceSession {
     this.#stdoutMirrorBuffer = '';
     this.#stderrMirrorBuffer = '';
 
-    logStream.write(`\n=== VICE launch ${nowIso()} ===\n`);
+    logStream.write(`\n=== Emulator launch ${nowIso()} ===\n`);
     logStream.write(`binary: ${binary}\n`);
     logStream.write(`args: ${args.join(' ')}\n`);
 
     child.stdout?.pipe(logStream, { end: false });
     child.stderr?.pipe(logStream, { end: false });
 
-    if (MIRROR_VICE_LOGS_TO_STDERR) {
+    if (MIRROR_EMULATOR_LOGS_TO_STDERR) {
       child.stdout?.on('data', (chunk) => {
         this.#mirrorViceOutputChunk('stdout', chunk);
       });
@@ -1973,7 +1973,7 @@ export class ViceSession {
     child.stderr?.unpipe(logStream);
     this.#flushViceOutputMirror('stdout');
     this.#flushViceOutputMirror('stderr');
-    logStream.write(`\n=== VICE stream closed ${nowIso()} (${reason}) ===\n`);
+    logStream.write(`\n=== Emulator stream closed ${nowIso()} (${reason}) ===\n`);
     logStream.end();
     this.#processLogStream = null;
   }
@@ -2012,7 +2012,7 @@ export class ViceSession {
 
   #writeProcessLogLine(line: string): void {
     this.#processLogStream?.write(`${nowIso()} ${line}\n`);
-    if (MIRROR_VICE_LOGS_TO_STDERR) {
+    if (MIRROR_EMULATOR_LOGS_TO_STDERR) {
       process.stderr.write(`[vice monitor] ${line}\n`);
     }
   }

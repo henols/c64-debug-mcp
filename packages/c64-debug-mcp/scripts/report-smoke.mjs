@@ -4,7 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const repoRoot = path.resolve(new URL('../../..', import.meta.url).pathname);
-const serverPath = path.join(repoRoot, 'packages/vice-debug-mcp/dist/stdio.js');
+const serverPath = path.join(repoRoot, 'packages/c64-debug-mcp/dist/stdio.js');
 const targetPrg = process.argv[2] ?? '/home/henrik/dev/henrik/git/heliovault/build/heliovault.prg';
 const breakpointAddress = Number.parseInt(process.argv[3] ?? '0x141c', 16);
 

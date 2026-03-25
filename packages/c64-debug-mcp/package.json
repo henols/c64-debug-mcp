@@ -1,5 +1,5 @@
 {
-  "name": "@vicemcp/vice-debug-mcp",
+  "name": "@c64mcp/c64-debug-mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,15 +7,15 @@
     "node": ">=22.13.0"
   },
   "bin": {
-    "vice-debug-mcp": "dist/stdio.js",
-    "vice-debug-mcp-http": "dist/http.js"
+    "c64-debug-mcp": "dist/stdio.js",
+    "c64-debug-mcp-http": "dist/http.js"
   },
   "scripts": {
     "build": "tsup src/stdio.ts src/http.ts --format esm,cjs --dts --no-splitting --clean",
     "check": "tsc --noEmit",
-    "dev:http": "VICE_DEBUG_CONSOLE_LOGS=1 /home/henrik/.nvm/versions/node/v22.13.0/bin/node ../../node_modules/tsx/dist/cli.mjs watch src/http.ts",
+    "dev:http": "C64_DEBUG_CONSOLE_LOGS=1 /home/henrik/.nvm/versions/node/v22.13.0/bin/node ../../node_modules/tsx/dist/cli.mjs watch src/http.ts",
     "smoke:http": "node tests/smoke-http.mjs",
-    "smoke:http:dev": "VICE_DEBUG_HTTP_URL=http://127.0.0.1:39080/mcp node tests/smoke-http.mjs",
+    "smoke:http:dev": "C64_DEBUG_HTTP_URL=http://127.0.0.1:39080/mcp node tests/smoke-http.mjs",
     "test:http:live": "bash ../../scripts/test-live-http.sh basic",
     "test:http:live:advanced": "bash ../../scripts/test-live-http.sh advanced",
     "test:http:live:tools": "bash ../../scripts/test-live-http.sh tools"

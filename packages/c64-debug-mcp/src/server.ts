@@ -33,7 +33,7 @@ import {
 } from './schemas.js';
 import { ViceSession } from './session.js';
 
-const viceSession = new ViceSession();
+const c64Session = new ViceSession();
 const noInputSchema = z.object({}).strict();
 
 function createViceTool<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny>(options: {
@@ -62,7 +62,7 @@ function createViceTool<TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAn
       try {
         const data = await options.execute(input as z.infer<TInput>);
         return {
-          meta: viceSession.takeResponseMeta(),
+          meta: c64Session.takeResponseMeta(),
           data,
         };
       } catch (error) {
@@ -101,7 +101,7 @@ const getMonitorStateTool = createViceTool({
   description: 'Returns whether the C64 is running or stopped, along with the current stop reason and program counter when available.',
   inputSchema: noInputSchema,
   dataSchema: monitorStateSchema,
-  execute: async () => await viceSession.getMonitorState(),
+  execute: async () => await c64Session.getMonitorState(),
 });
 
 const getSessionStateTool = createViceTool({
@@ -109,7 +109,7 @@ const getSessionStateTool = createViceTool({
   description: 'Returns richer emulator session state including transport/process status, auto-resume state, and the most recent hit checkpoint when known.',
   inputSchema: noInputSchema,
   dataSchema: sessionStateResultSchema,
-  execute: async () => viceSession.snapshot(),
+  execute: async () => c64Session.snapshot(),
 });
 
 const getRegistersTool = createViceTool({
@@ -119,7 +119,7 @@ const getRegistersTool = createViceTool({
   dataSchema: z.object({
     registers: c64RegisterValueSchema,
   }),
-  execute: async () => await viceSession.getRegisters(),
+  execute: async () => await c64Session.getRegisters(),
 });
 
 const setRegistersTool = createViceTool({
@@ -132,7 +132,7 @@ const setRegistersTool = createViceTool({
     updated: c64PartialRegisterValueSchema,
     executionState: executionStateSchema,
   }),
-  execute: async (input) => await viceSession.setRegisters(input.registers),
+  execute: async (input) => await c64Session.setRegisters(input.registers),
 });
 
 const readMemoryTool = createViceTool({
@@ -153,7 +153,7 @@ const readMemoryTool = createViceTool({
     data: byteArraySchema.describe('Raw bytes returned from memory'),
   }),
   execute: async (input) => {
-    const result = await viceSession.readMemory(input.address, input.address + input.length - 1);
+    const result = await c64Session.readMemory(input.address, input.address + input.length - 1);
     return {
       address: input.address,
       length: result.length,
@@ -179,7 +179,7 @@ const writeMemoryTool = createViceTool({
     address: address16Schema.describe('Start address where the bytes were written'),
     length: z.number().int().min(1).describe('Number of bytes written'),
   }).extend(debugStateSchema.shape),
-  execute: async (input) => await viceSession.writeMemory(input.address, input.data),
+  execute: async (input) => await c64Session.writeMemory(input.address, input.data),
 });
 
 const executeTool = createViceTool({
@@ -195,7 +195,7 @@ const executeTool = createViceTool({
     stepsExecuted: z.number().int().positive().optional(),
     warnings: z.array(warningSchema),
   }),
-  execute: async (input) => await viceSession.execute(input.action, input.count, input.resetMode, input.waitUntilRunningStable),
+  execute: async (input) => await c64Session.execute(input.action, input.count, input.resetMode, input.waitUntilRunningStable),
 });
 
 const waitForStateTool = createViceTool({
@@ -207,7 +207,7 @@ const waitForStateTool = createViceTool({
     stableMs: z.number().int().nonnegative().optional().describe('Optional stability window the target state must remain true before returning'),
   }),
   dataSchema: waitForStateResultSchema,
-  execute: async (input) => await viceSession.waitForState(input.executionState, input.timeoutMs, input.stableMs),
+  execute: async (input) => await c64Session.waitForState(input.executionState, input.timeoutMs, input.stableMs),
 });
 
 const listBreakpointsTool = createViceTool({
@@ -220,7 +220,7 @@ const listBreakpointsTool = createViceTool({
     breakpoints: z.array(breakpointSchema),
   }),
   execute: async (input) => {
-    const result = await viceSession.listBreakpoints(input.includeDisabled);
+    const result = await c64Session.listBreakpoints(input.includeDisabled);
     return {
       breakpoints: result.breakpoints.map((breakpoint) => normalizeBreakpoint(breakpoint)),
     };
@@ -247,7 +247,7 @@ const breakpointSetTool = createViceTool({
     registers: c64PartialRegisterValueSchema.nullable(),
   }),
   execute: async (input) => {
-    const result = await viceSession.breakpointSet(input);
+    const result = await c64Session.breakpointSet(input);
     return {
       breakpoint: normalizeBreakpoint(result.breakpoint),
       executionState: result.executionState,
@@ -272,7 +272,7 @@ const breakpointClearTool = createViceTool({
     cleared: z.boolean(),
     breakpointId: z.number().int(),
   }),
-  execute: async (input) => await viceSession.breakpointClear(input.breakpointId),
+  execute: async (input) => await c64Session.breakpointClear(input.breakpointId),
 });
 
 const programLoadTool = createViceTool({
@@ -284,7 +284,7 @@ const programLoadTool = createViceTool({
     fileIndex: z.number().int().nonnegative().default(0).describe('Autostart file index inside the image, when applicable'),
   }),
   dataSchema: programLoadResultSchema,
-  execute: async (input) => await viceSession.programLoad(input),
+  execute: async (input) => await c64Session.programLoad(input),
 });
 
 const captureDisplayTool = createViceTool({
@@ -294,7 +294,7 @@ const captureDisplayTool = createViceTool({
     useVic: z.boolean().default(true).describe('Whether to capture the VIC-II display when supported'),
   }),
   dataSchema: captureDisplayResultSchema,
-  execute: async (input) => await viceSession.captureDisplay(input.useVic),
+  execute: async (input) => await c64Session.captureDisplay(input.useVic),
 });
 
 const getDisplayStateTool = createViceTool({
@@ -302,7 +302,7 @@ const getDisplayStateTool = createViceTool({
   description: 'Returns screen RAM, color RAM, the current graphics mode, screen memory addresses, and the current border and background colors. If the emulator was running, the server restores running state before returning, subject to timeout.',
   inputSchema: noInputSchema,
   dataSchema: displayStateResultSchema,
-  execute: async () => await viceSession.getDisplayState(),
+  execute: async () => await c64Session.getDisplayState(),
 });
 
 const getDisplayTextTool = createViceTool({
@@ -310,7 +310,7 @@ const getDisplayTextTool = createViceTool({
   description: 'Returns the current text screen as readable text when the C64 is in a text mode. If the emulator was running, the server restores running state before returning, subject to timeout.',
   inputSchema: noInputSchema,
   dataSchema: displayTextResultSchema,
-  execute: async () => await viceSession.getDisplayText(),
+  execute: async () => await c64Session.getDisplayText(),
 });
 
 const writeTextTool = createViceTool({
@@ -324,7 +324,7 @@ const writeTextTool = createViceTool({
     sent: z.boolean(),
     length: z.number().int(),
   }),
-  execute: async (input) => await viceSession.writeText(input.text),
+  execute: async (input) => await c64Session.writeText(input.text),
 });
 
 const keyboardInputTool = createViceTool({
@@ -336,7 +336,7 @@ const keyboardInputTool = createViceTool({
     durationMs: z.number().int().positive().optional().describe('Tap duration in milliseconds'),
   }),
   dataSchema: keyboardInputResultSchema,
-  execute: async (input) => await viceSession.keyboardInput(input.action, input.keys, input.durationMs),
+  execute: async (input) => await c64Session.keyboardInput(input.action, input.keys, input.durationMs),
 });
 
 const joystickInputTool = createViceTool({
@@ -349,10 +349,10 @@ const joystickInputTool = createViceTool({
     durationMs: z.number().int().optional().describe('Tap duration in milliseconds (will be clamped to reasonable range)'),
   }),
   dataSchema: joystickInputResultSchema,
-  execute: async (input) => await viceSession.joystickInput(input.port, input.action, input.control, input.durationMs),
+  execute: async (input) => await c64Session.joystickInput(input.port, input.action, input.control, input.durationMs),
 });
 
-export const viceDebugServer = new MCPServer({
+export const c64DebugServer = new MCPServer({
   id: 'c64-debug-mcp',
   name: 'c64 debugger',
   version: '0.1.0',
@@ -380,4 +380,4 @@ export const viceDebugServer = new MCPServer({
   },
 });
 
-export { viceSession };
+export { c64Session };

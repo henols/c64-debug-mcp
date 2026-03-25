@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { viceDebugServer } from './server.js';
-import { viceSession } from './server.js';
+import { c64DebugServer } from './server.js';
+import { c64Session } from './server.js';
 
 let shuttingDown = false;
 
@@ -13,13 +13,13 @@ async function shutdown(exitCode = 0, error?: unknown): Promise<void> {
   shuttingDown = true;
 
   if (error) {
-    console.error('VICE Debug MCP server failed:', error);
+    console.error('C64 Debug MCP server failed:', error);
   }
 
   try {
-    await viceSession.shutdown();
+    await c64Session.shutdown();
   } catch (shutdownError) {
-    console.error('VICE Debug MCP shutdown failed:', shutdownError);
+    console.error('C64 Debug MCP shutdown failed:', shutdownError);
     exitCode = exitCode === 0 ? 1 : exitCode;
   } finally {
     process.exit(exitCode);
@@ -50,6 +50,6 @@ process.stdin.once('end', () => {
   void shutdown(0);
 });
 
-viceDebugServer.startStdio().catch((error) => {
+c64DebugServer.startStdio().catch((error) => {
   void shutdown(1, error);
 });

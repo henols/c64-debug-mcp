@@ -11,9 +11,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const repoRoot = path.resolve(new URL('../../..', import.meta.url).pathname);
-const packageRoot = path.join(repoRoot, 'packages/vice-debug-mcp');
+const packageRoot = path.join(repoRoot, 'packages/c64-debug-mcp');
 const serverPath = path.join(packageRoot, 'dist/stdio.js');
-const ARTIFACTS_DIR = '.vice-debug-mcp-artifacts';
+const ARTIFACTS_DIR = '.c64-debug-mcp-artifacts';
 const TEST_TIMEOUT = 300000; // 5 minutes
 
 class ChaosTest {
