@@ -1,8 +1,9 @@
 import fs from 'node:fs/promises';
+import { createWriteStream, type WriteStream } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import zlib from 'node:zlib';
 
 import {
@@ -17,14 +18,13 @@ import {
   type InputAction,
   type JoystickControl,
   type JoystickPort,
-  type ProgramLoadMode,
   type ResponseMeta,
   type SessionState,
   type StopReason,
   type WarningItem,
 } from './contracts.js';
-import { ViceMcpError, debuggerNotPausedError, unsupportedError, validationError } from './errors.js';
-import { ViceMonitorClient } from './vice-protocol.js';
+import { ViceMcpError, debuggerNotPausedError, emulatorNotRunningError, unsupportedError, validationError } from './errors.js';
+import { ViceMonitorClient, type MonitorRuntimeEventType } from './vice-protocol.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -103,39 +103,177 @@ async function firstRuntimeEntry(runtimeDir: string, pattern: RegExp, returnAbso
   }
 }
 
-function encodePngGrayscale(width: number, height: number, pixels: Uint8Array): string {
-  const rows = Buffer.alloc((width + 1) * height);
-  for (let y = 0; y < height; y += 1) {
-    rows[y * (width + 1)] = 0;
-    Buffer.from(pixels.subarray(y * width, y * width + width)).copy(rows, y * (width + 1) + 1);
+function makeWarning(message: string, code = 'warning'): WarningItem {
+  return { code, message };
+}
+
+function lowNibble(value: number): number {
+  return value & 0x0f;
+}
+
+function decodeVicBankAddress(dd00: number): number {
+  return ((dd00 ^ 0x03) & 0x03) * 0x4000;
+}
+
+function decodeGraphicsMode(d011: number, d016: number) {
+  const extendedColorMode = (d011 & 0x40) !== 0;
+  const bitmapMode = (d011 & 0x20) !== 0;
+  const multicolorMode = (d016 & 0x10) !== 0;
+
+  let graphicsMode:
+    | 'standard_text'
+    | 'multicolor_text'
+    | 'standard_bitmap'
+    | 'multicolor_bitmap'
+    | 'extended_background_color_text'
+    | 'invalid_text_mode'
+    | 'invalid_bitmap_mode_1'
+    | 'invalid_bitmap_mode_2';
+
+  if (!extendedColorMode && !bitmapMode && !multicolorMode) {
+    graphicsMode = 'standard_text';
+  } else if (!extendedColorMode && !bitmapMode && multicolorMode) {
+    graphicsMode = 'multicolor_text';
+  } else if (!extendedColorMode && bitmapMode && !multicolorMode) {
+    graphicsMode = 'standard_bitmap';
+  } else if (!extendedColorMode && bitmapMode && multicolorMode) {
+    graphicsMode = 'multicolor_bitmap';
+  } else if (extendedColorMode && !bitmapMode && !multicolorMode) {
+    graphicsMode = 'extended_background_color_text';
+  } else if (extendedColorMode && !bitmapMode && multicolorMode) {
+    graphicsMode = 'invalid_text_mode';
+  } else if (extendedColorMode && bitmapMode && !multicolorMode) {
+    graphicsMode = 'invalid_bitmap_mode_1';
+  } else {
+    graphicsMode = 'invalid_bitmap_mode_2';
   }
 
-  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const chunks = [
-    pngChunk(
-      'IHDR',
-      Buffer.concat([
-        uint32(width),
-        uint32(height),
-        Buffer.from([8, 0, 0, 0, 0]),
-      ]),
-    ),
-    pngChunk('IDAT', zlib.deflateSync(rows)),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ];
-  return Buffer.concat([signature, ...chunks]).toString('base64');
+  return {
+    graphicsMode,
+    extendedColorMode,
+    bitmapMode,
+    multicolorMode,
+  };
+}
+
+function isTextGraphicsMode(
+  graphicsMode:
+    | 'standard_text'
+    | 'multicolor_text'
+    | 'standard_bitmap'
+    | 'multicolor_bitmap'
+    | 'extended_background_color_text'
+    | 'invalid_text_mode'
+    | 'invalid_bitmap_mode_1'
+    | 'invalid_bitmap_mode_2',
+): boolean {
+  return (
+    graphicsMode === 'standard_text' ||
+    graphicsMode === 'multicolor_text' ||
+    graphicsMode === 'extended_background_color_text' ||
+    graphicsMode === 'invalid_text_mode'
+  );
+}
+
+function petsciiToScreenCode(value: number): number {
+  if (value === 0xff) {
+    return 0x5e;
+  }
+  if (value < 0x20) {
+    return value ^ 0x80;
+  }
+  if (value < 0x60) {
+    return value & 0x3f;
+  }
+  if (value < 0x80) {
+    return value & 0x5f;
+  }
+  if (value < 0xa0) {
+    return value | 0x40;
+  }
+  if (value < 0xc0) {
+    return value ^ 0xc0;
+  }
+  if (value < 0xff) {
+    return value ^ 0x80;
+  }
+  return 0x5e;
+}
+
+function decodeScreenCodeCell(code: number): { ascii: string; token?: string; lossy: boolean } {
+  if (code === 32 || code === 160) {
+    return { ascii: ' ', lossy: false };
+  }
+  if (code >= 1 && code <= 26) {
+    return { ascii: String.fromCharCode(64 + code), lossy: false };
+  }
+  if (code >= 48 && code <= 57) {
+    return { ascii: String.fromCharCode(code), lossy: false };
+  }
+  switch (code) {
+    case 0:
+      return { ascii: '@', lossy: false };
+    case 27:
+      return { ascii: '[', lossy: false };
+    case 28:
+      return { ascii: '£', lossy: false };
+    case 29:
+      return { ascii: ']', lossy: false };
+    case 34:
+      return { ascii: '"', lossy: false };
+    case 35:
+      return { ascii: '#', lossy: false };
+    case 36:
+      return { ascii: '$', lossy: false };
+    case 37:
+      return { ascii: '%', lossy: false };
+    case 38:
+      return { ascii: '&', lossy: false };
+    case 39:
+      return { ascii: '\'', lossy: false };
+    case 40:
+      return { ascii: '(', lossy: false };
+    case 41:
+      return { ascii: ')', lossy: false };
+    case 42:
+      return { ascii: '*', lossy: false };
+    case 43:
+      return { ascii: '+', lossy: false };
+    case 44:
+      return { ascii: ',', lossy: false };
+    case 45:
+      return { ascii: '-', lossy: false };
+    case 46:
+      return { ascii: '.', lossy: false };
+    case 47:
+      return { ascii: '/', lossy: false };
+    case 58:
+      return { ascii: ':', lossy: false };
+    case 59:
+      return { ascii: ';', lossy: false };
+    case 60:
+      return { ascii: '↑', lossy: false };
+    case 61:
+      return { ascii: '=', lossy: false };
+    case 62:
+      return { ascii: '←', lossy: false };
+    case 63:
+      return { ascii: '?', lossy: false };
+    case 94:
+      return { ascii: 'π', lossy: false };
+    default:
+      return {
+        ascii: '�',
+        token: SCREEN_CODE_TOKEN_MAP.get(code) ?? `<SC:${code}>`,
+        lossy: true,
+      };
+  }
 }
 
 function uint32(value: number): Buffer {
   const buffer = Buffer.alloc(4);
   buffer.writeUInt32BE(value, 0);
   return buffer;
-}
-
-function pngChunk(type: string, data: Buffer): Buffer {
-  const typeBuffer = Buffer.from(type, 'ascii');
-  const crc = crc32(Buffer.concat([typeBuffer, data]));
-  return Buffer.concat([uint32(data.length), typeBuffer, data, uint32(crc >>> 0)]);
 }
 
 const CRC_TABLE = new Uint32Array(256).map((_, index) => {
@@ -154,86 +292,258 @@ function crc32(buffer: Buffer): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function makeWarning(message: string, code = 'warning'): WarningItem {
-  return { code, message };
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const crc = crc32(Buffer.concat([typeBuffer, data]));
+  return Buffer.concat([uint32(data.length), typeBuffer, data, uint32(crc >>> 0)]);
 }
 
-function parseEscapedText(input: string): string {
-  let result = '';
+function encodePngRgb(width: number, height: number, pixels: Uint8Array): Buffer {
+  const stride = width * 3;
+  const rows = Buffer.alloc((stride + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const rowOffset = y * (stride + 1);
+    rows[rowOffset] = 0;
+    Buffer.from(pixels.subarray(y * stride, y * stride + stride)).copy(rows, rowOffset + 1);
+  }
+
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const chunks = [
+    pngChunk(
+      'IHDR',
+      Buffer.concat([
+        uint32(width),
+        uint32(height),
+        Buffer.from([8, 2, 0, 0, 0]),
+      ]),
+    ),
+    pngChunk('IDAT', zlib.deflateSync(rows)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ];
+
+  return Buffer.concat([signature, ...chunks]);
+}
+
+type PetsciiTokenDefinition = {
+  canonical: string;
+  bytes: readonly number[];
+  aliases: readonly string[];
+};
+
+const PETSCII_TOKEN_DEFINITIONS: readonly PetsciiTokenDefinition[] = [
+  { canonical: 'RETURN', bytes: [0x0d], aliases: ['ENTER'] },
+  { canonical: 'SHIFT RETURN', bytes: [0x8d], aliases: ['SHIFT ENTER', 'SH RETURN', 'SH ENTER', 'STRET'] },
+  { canonical: 'SPACE', bytes: [0x20], aliases: ['SPC'] },
+  { canonical: 'SHIFT SPACE', bytes: [0xa0], aliases: ['SH SPACE'] },
+  { canonical: 'HOME', bytes: [0x13], aliases: ['CURSOR HOME', 'CUR HOME'] },
+  { canonical: 'CLEAR', bytes: [0x93], aliases: ['CLR', 'CLEAR SCREEN'] },
+  { canonical: 'DELETE', bytes: [0x14], aliases: ['DEL', 'BACKSPACE'] },
+  { canonical: 'INSERT', bytes: [0x94], aliases: ['INST', 'INS'] },
+  { canonical: 'DOWN', bytes: [0x11], aliases: ['CURSOR DOWN', 'CUR DOWN'] },
+  { canonical: 'UP', bytes: [0x91], aliases: ['CURSOR UP', 'CUR UP'] },
+  { canonical: 'LEFT', bytes: [0x9d], aliases: ['CURSOR LEFT', 'CUR LEFT'] },
+  { canonical: 'RIGHT', bytes: [0x1d], aliases: ['CURSOR RIGHT', 'CUR RIGHT'] },
+  { canonical: 'REVERSE ON', bytes: [0x12], aliases: ['RVS ON', 'RVON', 'RVRS ON'] },
+  { canonical: 'REVERSE OFF', bytes: [0x92], aliases: ['RVS OFF', 'RVOF', 'RVRS OFF'] },
+  { canonical: 'BLACK', bytes: [0x90], aliases: ['BLK'] },
+  { canonical: 'WHITE', bytes: [0x05], aliases: ['WHT'] },
+  { canonical: 'RED', bytes: [0x1c], aliases: [] },
+  { canonical: 'CYAN', bytes: [0x9f], aliases: ['CYN'] },
+  { canonical: 'PURPLE', bytes: [0x9c], aliases: ['PUR'] },
+  { canonical: 'GREEN', bytes: [0x1e], aliases: ['GRN'] },
+  { canonical: 'BLUE', bytes: [0x1f], aliases: ['BLU'] },
+  { canonical: 'YELLOW', bytes: [0x9e], aliases: ['YEL'] },
+  { canonical: 'ORANGE', bytes: [0x81], aliases: ['ORNG'] },
+  { canonical: 'BROWN', bytes: [0x95], aliases: ['BRN'] },
+  { canonical: 'LIGHT RED', bytes: [0x96], aliases: ['LRED', 'PINK', 'LT RED'] },
+  { canonical: 'DARK GRAY', bytes: [0x97], aliases: ['DARK GREY', 'GRAY1', 'GREY1', 'GRY1'] },
+  { canonical: 'GRAY', bytes: [0x98], aliases: ['GREY', 'GRAY2', 'GREY2', 'GRY2', 'MEDIUM GRAY', 'MEDIUM GREY'] },
+  { canonical: 'LIGHT GREEN', bytes: [0x99], aliases: ['LGRN', 'LT GREEN'] },
+  { canonical: 'LIGHT BLUE', bytes: [0x9a], aliases: ['LBLU', 'LT BLUE'] },
+  { canonical: 'LIGHT GRAY', bytes: [0x9b], aliases: ['LIGHT GREY', 'GRAY3', 'GREY3', 'GRY3'] },
+  { canonical: 'F1', bytes: [0x85], aliases: [] },
+  { canonical: 'F2', bytes: [0x89], aliases: [] },
+  { canonical: 'F3', bytes: [0x86], aliases: [] },
+  { canonical: 'F4', bytes: [0x8a], aliases: [] },
+  { canonical: 'F5', bytes: [0x87], aliases: [] },
+  { canonical: 'F6', bytes: [0x8b], aliases: [] },
+  { canonical: 'F7', bytes: [0x88], aliases: [] },
+  { canonical: 'F8', bytes: [0x8c], aliases: [] },
+  { canonical: 'STOP', bytes: [0x03], aliases: ['RUN STOP', 'RUNSTOP'] },
+  { canonical: 'LOWER', bytes: [0x0e], aliases: ['LOWERCASE', 'SWLC'] },
+  { canonical: 'UPPER', bytes: [0x8e], aliases: ['UPPERCASE', 'SWUC'] },
+  { canonical: 'POUND', bytes: [0x5c], aliases: ['GBP', 'UK POUND'] },
+  { canonical: 'UP ARROW', bytes: [0x5e], aliases: ['ARROW UP'] },
+  { canonical: 'LEFT ARROW', bytes: [0x5f], aliases: ['ARROW LEFT', 'BACK ARROW'] },
+  { canonical: 'PI', bytes: [0xff], aliases: [] },
+] as const;
+
+const PETSCII_TOKEN_MAP = new Map<string, PetsciiTokenDefinition>();
+for (const definition of PETSCII_TOKEN_DEFINITIONS) {
+  PETSCII_TOKEN_MAP.set(definition.canonical, definition);
+  for (const alias of definition.aliases) {
+    PETSCII_TOKEN_MAP.set(alias, definition);
+  }
+}
+
+const SCREEN_CODE_TOKEN_MAP = new Map<number, string>();
+for (const definition of PETSCII_TOKEN_DEFINITIONS) {
+  for (const byte of definition.bytes) {
+    const screenCode = petsciiToScreenCode(byte);
+    if (!SCREEN_CODE_TOKEN_MAP.has(screenCode)) {
+      SCREEN_CODE_TOKEN_MAP.set(screenCode, `<${definition.canonical}>`);
+    }
+  }
+}
+
+const DIRECT_PETSCII_CHAR_BYTES = new Map<string, number>([
+  ['£', 0x5c],
+  ['↑', 0x5e],
+  ['←', 0x5f],
+  ['π', 0xff],
+  ['Π', 0xff],
+]);
+
+type ResolvedPetsciiKey = {
+  canonical: string;
+  bytes: Uint8Array;
+};
+
+function normalizePetsciiTokenName(token: string): string {
+  return token.trim().toUpperCase().replace(/[\s_-]+/g, ' ');
+}
+
+function lookupPetsciiToken(token: string): PetsciiTokenDefinition {
+  const normalized = normalizePetsciiTokenName(token);
+  const definition = PETSCII_TOKEN_MAP.get(normalized);
+  if (!definition) {
+    unsupportedError('Requested keyboard token is not representable through PETSCII keyboard-buffer input.', {
+      token,
+      normalizedToken: normalized,
+    });
+  }
+  return definition;
+}
+
+function encodeLiteralPetsciiChar(char: string): number {
+  if (char === '\n' || char === '\r') {
+    return 0x0d;
+  }
+
+  if (char === '\t') {
+    return 0x20;
+  }
+
+  const direct = DIRECT_PETSCII_CHAR_BYTES.get(char);
+  if (direct != null) {
+    return direct;
+  }
+
+  const code = char.codePointAt(0);
+  if (code == null) {
+    validationError('write_text received an empty character while encoding PETSCII');
+  }
+
+  if (code >= 0x61 && code <= 0x7a) {
+    return code - 0x20;
+  }
+
+  if (code >= 0x20 && code <= 0x5d) {
+    return code;
+  }
+
+  validationError('write_text only supports characters representable in the supported PETSCII subset', {
+    character: char,
+    codePoint: code,
+  });
+}
+
+function decodeWriteTextToPetscii(input: string): Uint8Array {
+  const bytes: number[] = [];
 
   for (let index = 0; index < input.length; index += 1) {
     const char = input[index]!;
-    if (char !== '\\') {
-      result += char;
+
+    if (char === '\\') {
+      const next = input[index + 1];
+      if (next == null) {
+        validationError('write_text received a trailing backslash escape with no character after it');
+      }
+
+      switch (next) {
+        case 'n':
+          bytes.push(0x0d);
+          break;
+        case 'r':
+          bytes.push(0x0d);
+          break;
+        case 't':
+          bytes.push(0x20);
+          break;
+        case '\\':
+          bytes.push(encodeLiteralPetsciiChar('\\'));
+          break;
+        case '"':
+          bytes.push(encodeLiteralPetsciiChar('"'));
+          break;
+        case "'":
+          bytes.push(encodeLiteralPetsciiChar("'"));
+          break;
+        default:
+          validationError('write_text received an unsupported escape sequence', {
+            escape: `\\${next}`,
+          });
+      }
+
+      index += 1;
       continue;
     }
 
-    const next = input[index + 1];
-    if (next == null) {
-      validationError('write_text received a trailing backslash escape with no character after it');
-    }
-
-    switch (next) {
-      case 'n':
-        result += '\n';
-        break;
-      case 'r':
-        result += '\r';
-        break;
-      case 't':
-        result += '\t';
-        break;
-      case '\\':
-        result += '\\';
-        break;
-      case '"':
-        result += '"';
-        break;
-      case "'":
-        result += "'";
-        break;
-      default:
-        validationError('write_text received an unsupported escape sequence', {
-          escape: `\\${next}`,
+    if (char === '{') {
+      const end = input.indexOf('}', index + 1);
+      if (end === -1) {
+        validationError('write_text received an opening brace without a closing brace', {
+          position: index,
         });
-    }
+      }
 
-    index += 1;
-  }
+      const rawToken = input.slice(index + 1, end);
+      if (!rawToken.trim()) {
+        validationError('write_text received an empty brace token', {
+          position: index,
+        });
+      }
 
-  return result;
-}
-
-function encodePetscii(text: string): Uint8Array {
-  const bytes: number[] = [];
-  for (const char of text) {
-    if (char === '\n' || char === '\r') {
-      bytes.push(0x0d);
+      const definition = lookupPetsciiToken(rawToken);
+      bytes.push(...definition.bytes);
+      index = end;
       continue;
     }
 
-    const code = char.codePointAt(0);
-    if (code == null) {
-      continue;
-    }
-
-    if (code >= 0x61 && code <= 0x7a) {
-      bytes.push(code - 0x20);
-      continue;
-    }
-
-    if ((code >= 0x20 && code <= 0x5f) || (code >= 0x30 && code <= 0x39) || code === 0x5c) {
-      bytes.push(code);
-      continue;
-    }
-
-    validationError('write_text only supports characters representable in the supported PETSCII subset', {
-      character: char,
-      codePoint: code,
-    });
+    bytes.push(encodeLiteralPetsciiChar(char));
   }
 
   return Uint8Array.from(bytes);
+}
+
+function resolveKeyboardInputKey(key: string): ResolvedPetsciiKey {
+  const trimmed = key.trim();
+  if (!trimmed) {
+    validationError('keyboard_input requires a non-empty key name');
+  }
+
+  if (trimmed.length === 1) {
+    return {
+      canonical: normalizePetsciiTokenName(trimmed),
+      bytes: Uint8Array.from([encodeLiteralPetsciiChar(trimmed)]),
+    };
+  }
+
+  const definition = lookupPetsciiToken(trimmed);
+  return {
+    canonical: definition.canonical,
+    bytes: Uint8Array.from(definition.bytes),
+  };
 }
 
 const JOYSTICK_CONTROL_BITS: Record<JoystickControl, number> = {
@@ -247,32 +557,29 @@ const JOYSTICK_CONTROL_BITS: Record<JoystickControl, number> = {
 const JOYSTICK_RELEASED_MASK = 0x1f;
 const DEFAULT_INPUT_TAP_MS = 75;
 const DEFAULT_KEYBOARD_REPEAT_MS = 100;
-
-function normalizeKeyboardKey(key: string): string {
-  const trimmed = key.trim();
-  if (!trimmed) {
-    validationError('keyboard_input requires a non-empty key name');
-  }
-
-  const symbolic = trimmed.toUpperCase();
-  switch (symbolic) {
-    case 'SPACE':
-      return ' ';
-    case 'ENTER':
-    case 'RETURN':
-      return '\n';
-    case 'TAB':
-      return ' ';
-    default:
-      if (trimmed.length === 1) {
-        return trimmed;
-      }
-      unsupportedError(
-        'keyboard_input supports single ASCII characters plus the symbolic keys SPACE, ENTER, RETURN, and TAB.',
-        { key: trimmed },
-      );
-  }
-}
+const VICE_PROCESS_LOG_PATH = path.join(os.tmpdir(), 'vice-debug-mcp-x64sc.log');
+const DISPLAY_CAPTURE_DIR = path.resolve(process.cwd(), '.vice-debug-mcp-artifacts');
+const MIRROR_VICE_LOGS_TO_STDERR = /^(1|true|yes|on)$/i.test(process.env.VICE_DEBUG_CONSOLE_LOGS ?? '');
+const EXECUTION_EVENT_WAIT_MS = 1000;
+const EXECUTION_SETTLE_DELAY_MS = 2000;
+const BOOTSTRAP_INITIAL_DELAY_MS = 2000;
+const BOOTSTRAP_SETTLE_TIMEOUT_MS = 15000;
+const BOOTSTRAP_POLL_MS = 250;
+const BOOTSTRAP_RUNNING_STABLE_MS = 3000;
+const BOOTSTRAP_RESUME_COOLDOWN_MS = 500;
+const PROGRAM_LOAD_SETTLE_TIMEOUT_MS = 15000;
+const PROGRAM_LOAD_SETTLE_POLL_MS = 250;
+const PROGRAM_LOAD_RUNNING_STABLE_MS = 3000;
+const PROGRAM_LOAD_RESUME_COOLDOWN_MS = 500;
+const DISPLAY_SETTLE_TIMEOUT_MS = 5000;
+const DISPLAY_SETTLE_POLL_MS = 100;
+const DISPLAY_PAUSE_TIMEOUT_MS = 5000;
+const DISPLAY_RUNNING_STABLE_MS = 750;
+const DISPLAY_RESUME_COOLDOWN_MS = 250;
+const INPUT_SETTLE_TIMEOUT_MS = 5000;
+const INPUT_SETTLE_POLL_MS = 100;
+const INPUT_RUNNING_STABLE_MS = 750;
+const INPUT_RESUME_COOLDOWN_MS = 250;
 
 function clampTapDuration(durationMs: number | undefined): number {
   if (durationMs == null) {
@@ -374,6 +681,13 @@ type DebugState = {
   registers: C64RegisterValues;
 };
 
+type MonitorState = {
+  executionState: SessionState['executionState'];
+  lastStopReason: StopReason;
+  runtimeKnown: boolean;
+  programCounter: number | null;
+};
+
 type BreakpointWithOptionalLabel = {
   id: number;
   start: number;
@@ -401,7 +715,10 @@ export class ViceSession {
   #port: number | null = null;
   #connectedSince: string | null = null;
   #lastResponseAt: string | null = null;
-  #process: ChildProcessWithoutNullStreams | null = null;
+  #process: ChildProcess | null = null;
+  #processLogStream: WriteStream | null = null;
+  #stdoutMirrorBuffer = '';
+  #stderrMirrorBuffer = '';
   #warnings: WarningItem[] = [];
   #lastExecutionIntent: StopReason = 'unknown';
   #lastRegisters: C64RegisterValues | null = null;
@@ -419,34 +736,26 @@ export class ViceSession {
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
-    this.#client.on('response', () => {
+    this.#client.on('response', (response) => {
       this.#lastResponseAt = nowIso();
-    });
-    this.#client.on('event', (event) => {
-      if (event.type === 'resumed') {
-        this.#executionState = 'running';
-        this.#lastStopReason = 'none';
-        return;
-      }
-
-      if (event.type === 'stopped') {
-        this.#executionState = 'stopped_in_monitor';
-        this.#lastStopReason = this.#lastExecutionIntent;
-        return;
-      }
-
-      if (event.type === 'jam') {
-        this.#executionState = 'stopped_in_monitor';
-        this.#lastStopReason = 'error';
-      }
+      this.#writeProcessLogLine(`[monitor-response] type=${response.type} requestId=${response.requestId} errorCode=${response.errorCode}`);
     });
     this.#client.on('close', () => {
+      this.#writeProcessLogLine('[monitor-close] debugger connection closed');
       if (this.#transportState !== 'stopped') {
         this.#transportState = 'disconnected';
       }
+      this.#syncMonitorRuntimeState();
       if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
         void this.#scheduleRecovery();
       }
+    });
+    this.#client.on('event', (event) => {
+      const programCounter = 'programCounter' in event && typeof event.programCounter === 'number' ? event.programCounter : null;
+      this.#writeProcessLogLine(
+        `[monitor-event] type=${event.type}${programCounter == null ? '' : ` pc=$${programCounter.toString(16).padStart(4, '0')}`}`,
+      );
+      this.#syncMonitorRuntimeState();
     });
   }
 
@@ -467,9 +776,23 @@ export class ViceSession {
     };
   }
 
-  async getDebugState(): Promise<DebugState> {
-    await this.#ensurePausedForDebug();
-    return await this.#readDebugState();
+  async getMonitorState(): Promise<MonitorState> {
+    await this.#ensureReady();
+    this.#syncMonitorRuntimeState();
+    const runtime = this.#client.runtimeState();
+    return {
+      executionState: this.#executionState,
+      lastStopReason: this.#lastStopReason,
+      runtimeKnown: runtime.runtimeKnown,
+      programCounter: runtime.programCounter,
+    };
+  }
+
+  async getRegisters(): Promise<{ registers: C64RegisterValues }> {
+    await this.#ensurePausedForDebug('get_registers');
+    return {
+      registers: await this.#readRegisters(),
+    };
   }
 
   async shutdown(): Promise<void> {
@@ -487,6 +810,7 @@ export class ViceSession {
     this.#breakpointLabels.clear();
 
     try {
+      await this.#resumeBeforeShutdown();
       await this.#stopManagedProcess(true);
     } finally {
       this.#transportState = 'stopped';
@@ -510,10 +834,8 @@ export class ViceSession {
     return meta;
   }
 
-  async execute(action: 'pause' | 'resume' | 'step' | 'step_over' | 'step_out' | 'reset', count = 1, resetMode: 'soft' | 'hard' = 'soft') {
+  async execute(action: 'resume' | 'step' | 'step_over' | 'step_out' | 'reset', count = 1, resetMode: 'soft' | 'hard' = 'soft') {
     switch (action) {
-      case 'pause':
-        return await this.#pauseExecution();
       case 'resume':
         return await this.continueExecution();
       case 'step':
@@ -528,7 +850,7 @@ export class ViceSession {
   }
 
   async setRegisters(registers: Partial<Record<C64RegisterName, number>>) {
-    await this.#ensurePausedForDebug();
+    await this.#ensurePausedForDebug('set_registers');
     const metadata = await this.#client.getRegistersAvailable();
     const metadataByName = new Map(metadata.registers.map((item) => [item.name.toUpperCase(), item]));
 
@@ -598,7 +920,7 @@ export class ViceSession {
   }
 
   async readMemory(start: number, end: number, bank = 0) {
-    await this.#ensurePausedForDebug();
+    await this.#ensurePausedForDebug('memory_read');
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, bank);
     return {
@@ -608,7 +930,7 @@ export class ViceSession {
   }
 
   async writeMemory(start: number, data: number[], bank = 0) {
-    await this.#ensurePausedForDebug();
+    await this.#ensurePausedForDebug('memory_write');
     const bytes = Uint8Array.from(data);
     if (bytes.length === 0) {
       validationError('write_memory requires at least one byte');
@@ -631,17 +953,17 @@ export class ViceSession {
 
   async continueExecution() {
     await this.#ensureReady();
-    if (this.#executionState !== 'stopped_in_monitor' || !this.#lastRegisters) {
-      debuggerNotPausedError({
+    if (this.#executionState !== 'stopped') {
+      debuggerNotPausedError('execute resume', {
         executionState: this.#executionState,
         lastStopReason: this.#lastStopReason,
       });
     }
-    const debugState = this.#buildDebugState(this.#lastRegisters);
+    const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
     this.#lastExecutionIntent = 'unknown';
+    this.#writeProcessLogLine('[tx] execute resume');
     await this.#client.continueExecution();
-    this.#executionState = 'running';
-    this.#lastStopReason = 'none';
+    this.#syncMonitorRuntimeState();
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
@@ -652,11 +974,11 @@ export class ViceSession {
   }
 
   async stepInstruction(count = 1, stepOver = false) {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug(stepOver ? 'execute step_over' : 'execute step');
     this.#lastExecutionIntent = 'step_complete';
+    this.#writeProcessLogLine(`[tx] ${stepOver ? 'execute step_over' : 'execute step'} count=${count}`);
     await this.#client.stepInstruction(count, stepOver);
-    this.#executionState = 'stopped_in_monitor';
-    this.#lastStopReason = 'step_complete';
+    this.#syncMonitorRuntimeState();
     const debugState = await this.#readDebugState();
     return {
       executionState: debugState.executionState,
@@ -669,11 +991,11 @@ export class ViceSession {
   }
 
   async stepOut() {
-    await this.#ensureReady();
+    await this.#ensurePausedForDebug('execute step_out');
     this.#lastExecutionIntent = 'step_complete';
+    this.#writeProcessLogLine('[tx] execute step_out');
     await this.#client.stepOut();
-    this.#executionState = 'stopped_in_monitor';
-    this.#lastStopReason = 'step_complete';
+    this.#syncMonitorRuntimeState();
     const debugState = await this.#readDebugState();
     return {
       executionState: debugState.executionState,
@@ -687,9 +1009,9 @@ export class ViceSession {
   async resetMachine(mode: 'soft' | 'hard') {
     await this.#ensureReady();
     this.#lastExecutionIntent = 'reset';
+    this.#writeProcessLogLine(`[tx] execute reset mode=${mode}`);
     await this.#client.reset(mode);
-    this.#executionState = 'stopped_in_monitor';
-    this.#lastStopReason = 'reset';
+    this.#syncMonitorRuntimeState();
     const debugState = await this.#readDebugState();
     return {
       executionState: debugState.executionState,
@@ -701,7 +1023,8 @@ export class ViceSession {
   }
 
   async listBreakpoints(includeDisabled = true) {
-    await this.#ensurePausedForDebug();
+    await this.#ensureReady();
+    this.#writeProcessLogLine(`[tx] breakpoint_list includeDisabled=${includeDisabled}`);
     const response = await this.#client.listBreakpoints();
     this.#pruneBreakpointLabels(response.checkpoints.map((breakpoint) => breakpoint.id));
     return {
@@ -720,7 +1043,10 @@ export class ViceSession {
     temporary?: boolean;
     enabled?: boolean;
   }) {
-    await this.#ensurePausedForDebug();
+    await this.#ensureReady();
+    this.#writeProcessLogLine(
+      `[tx] breakpoint_set kind=${options.kind} start=$${options.start.toString(16).padStart(4, '0')}${options.end == null ? '' : ` end=$${options.end.toString(16).padStart(4, '0')}`}${options.temporary ? ' temporary=true' : ''}${options.enabled === false ? ' enabled=false' : ''}`,
+    );
     const response = await this.#client.setBreakpoint({
       start: options.start,
       end: options.end,
@@ -735,28 +1061,27 @@ export class ViceSession {
     } else {
       this.#breakpointLabels.delete(response.checkpoint.id);
     }
-    const debugState = await this.#readDebugState();
     return {
       breakpoint: this.#attachBreakpointLabel(response.checkpoint),
-      executionState: debugState.executionState,
-      lastStopReason: debugState.lastStopReason,
-      programCounter: debugState.programCounter,
-      registers: debugState.registers,
+      executionState: this.#executionState,
+      lastStopReason: this.#lastStopReason,
+      programCounter: this.#lastRegisters?.PC ?? null,
+      registers: this.#lastRegisters,
     };
   }
 
   async deleteBreakpoint(breakpointId: number) {
-    await this.#ensurePausedForDebug();
+    await this.#ensureReady();
+    this.#writeProcessLogLine(`[tx] breakpoint_clear id=${breakpointId}`);
     await this.#client.deleteBreakpoint(breakpointId);
     this.#breakpointLabels.delete(breakpointId);
-    const debugState = await this.#readDebugState();
     return {
       cleared: true,
       breakpointId,
-      executionState: debugState.executionState,
-      lastStopReason: debugState.lastStopReason,
-      programCounter: debugState.programCounter,
-      registers: debugState.registers,
+      executionState: this.#executionState,
+      lastStopReason: this.#lastStopReason,
+      programCounter: this.#lastRegisters?.PC ?? null,
+      registers: this.#lastRegisters,
     };
   }
 
@@ -790,72 +1115,250 @@ export class ViceSession {
     return await this.deleteBreakpoint(breakpointId);
   }
 
-  async loadProgram(filePath: string, addressOverride?: number | null) {
-    await this.#ensurePausedForDebug();
-    const absolutePath = path.resolve(filePath);
-    const contents = await fs.readFile(absolutePath);
-    if (contents.length < 2) {
-      throw new ViceMcpError('invalid_prg', 'PRG file is too small', 'validation');
-    }
-
-    const loadAddress = addressOverride ?? contents.readUInt16LE(0);
-    const bytes = contents.subarray(2);
-    await this.#client.writeMemory(loadAddress, bytes);
-    return {
-      filePath: absolutePath,
-      start: loadAddress,
-      length: bytes.length,
-      written: true,
-    };
-  }
-
   async programLoad(options: {
     filePath: string;
-    mode: ProgramLoadMode;
-    address?: number | null;
-    runAfterLoading?: boolean;
+    autoStart?: boolean;
     fileIndex?: number;
   }) {
+    await this.#ensureRunning('program_load');
     const filePath = path.resolve(options.filePath);
 
-    if (options.mode === 'memory') {
-      const result = await this.loadProgram(filePath, options.address ?? null);
-      return {
-        filePath: result.filePath,
-        mode: options.mode,
-        start: result.start,
-        length: result.length,
-        written: result.written,
-        runAfterLoading: null,
-        fileIndex: null,
-        executionState: null,
-      };
-    }
-
-    const result = await this.autostartProgram(filePath, options.runAfterLoading ?? true, options.fileIndex ?? 0);
+    const result = await this.autostartProgram(filePath, options.autoStart ?? true, options.fileIndex ?? 0);
     return {
       filePath: result.filePath,
-      mode: options.mode,
-      start: null,
-      length: null,
-      written: null,
-      runAfterLoading: result.runAfterLoading,
+      autoStart: result.autoStart,
       fileIndex: result.fileIndex,
       executionState: result.executionState,
     };
   }
 
-  async autostartProgram(filePath: string, runAfterLoading = true, fileIndex = 0) {
+  async captureDisplay(useVic = true) {
+    await this.#ensureReady();
+    this.#syncMonitorRuntimeState();
+    const previousExecutionState = this.#executionState;
+    this.#writeProcessLogLine(`[tx] capture_display useVic=${useVic}`);
+
+    const display = await this.#client.captureDisplay(useVic);
+    const palette = await this.#client.getPalette(useVic);
+
+    if (display.bitsPerPixel !== 8) {
+      throw new ViceMcpError(
+        'display_bpp_unsupported',
+        `capture_display only supports 8-bit indexed display payloads, got ${display.bitsPerPixel}.`,
+        'unsupported',
+        false,
+        { bitsPerPixel: display.bitsPerPixel },
+      );
+    }
+
+    const expectedLength = display.debugWidth * display.debugHeight;
+    if (display.imageBytes.length !== expectedLength) {
+      throw new ViceMcpError(
+        'display_payload_invalid',
+        'capture_display received a display payload whose length does not match the reported debug dimensions.',
+        'protocol',
+        false,
+        {
+          debugWidth: display.debugWidth,
+          debugHeight: display.debugHeight,
+          expectedLength,
+          actualLength: display.imageBytes.length,
+        },
+      );
+    }
+
+    if (palette.items.length === 0) {
+      throw new ViceMcpError('display_palette_missing', 'capture_display received an empty display palette.', 'protocol', false);
+    }
+
+    if (
+      display.debugOffsetX + display.innerWidth > display.debugWidth ||
+      display.debugOffsetY + display.innerHeight > display.debugHeight
+    ) {
+      throw new ViceMcpError(
+        'display_crop_invalid',
+        'capture_display received crop geometry outside the display buffer bounds.',
+        'protocol',
+        false,
+        {
+          debugWidth: display.debugWidth,
+          debugHeight: display.debugHeight,
+          debugOffsetX: display.debugOffsetX,
+          debugOffsetY: display.debugOffsetY,
+          innerWidth: display.innerWidth,
+          innerHeight: display.innerHeight,
+        },
+      );
+    }
+
+    const rgbPixels = new Uint8Array(display.innerWidth * display.innerHeight * 3);
+    for (let y = 0; y < display.innerHeight; y += 1) {
+      for (let x = 0; x < display.innerWidth; x += 1) {
+        const sourceX = display.debugOffsetX + x;
+        const sourceY = display.debugOffsetY + y;
+        const sourceIndex = sourceY * display.debugWidth + sourceX;
+        const paletteIndex = display.imageBytes[sourceIndex]!;
+        const color = palette.items[paletteIndex];
+        if (!color) {
+          throw new ViceMcpError(
+            'display_palette_index_invalid',
+            'capture_display encountered a pixel index that is outside the current palette.',
+            'protocol',
+            false,
+            { paletteIndex, paletteSize: palette.items.length },
+          );
+        }
+        const targetIndex = (y * display.innerWidth + x) * 3;
+        rgbPixels[targetIndex] = color.red;
+        rgbPixels[targetIndex + 1] = color.green;
+        rgbPixels[targetIndex + 2] = color.blue;
+      }
+    }
+
+    await fs.mkdir(DISPLAY_CAPTURE_DIR, { recursive: true });
+    const imagePath = path.join(DISPLAY_CAPTURE_DIR, `capture-${Date.now()}-${process.pid}.png`);
+    await fs.writeFile(imagePath, encodePngRgb(display.innerWidth, display.innerHeight, rgbPixels));
+    await this.#settleDisplayToolState('capture_display', previousExecutionState);
+
+    return {
+      imagePath,
+      width: display.innerWidth,
+      height: display.innerHeight,
+      debugWidth: display.debugWidth,
+      debugHeight: display.debugHeight,
+      debugOffsetX: display.debugOffsetX,
+      debugOffsetY: display.debugOffsetY,
+      bitsPerPixel: display.bitsPerPixel,
+    };
+  }
+
+  async getDisplayState() {
+    await this.#ensureReady();
+    this.#syncMonitorRuntimeState();
+    const previousExecutionState = this.#executionState;
+    await this.#pauseForDisplayInspection('get_display_state', previousExecutionState);
+
+    try {
+      this.#writeProcessLogLine('[tx] get_display_state');
+
+      const vicPrimary = await this.#client.readMemory(0xd011, 0xd018, 0);
+      const cia2Bank = await this.#client.readMemory(0xdd00, 0xdd00, 0);
+      const colors = await this.#client.readMemory(0xd020, 0xd024, 0);
+
+      const d011 = vicPrimary.bytes[0] ?? 0;
+      const d016 = vicPrimary.bytes[5] ?? 0;
+      const d018 = vicPrimary.bytes[7] ?? 0;
+      const dd00 = cia2Bank.bytes[0] ?? 0;
+      const d020 = colors.bytes[0] ?? 0;
+      const d021 = colors.bytes[1] ?? 0;
+      const d022 = colors.bytes[2] ?? 0;
+      const d023 = colors.bytes[3] ?? 0;
+      const d024 = colors.bytes[4] ?? 0;
+
+      const vicBankAddress = decodeVicBankAddress(dd00);
+      const screenRamAddress = vicBankAddress + (((d018 >> 4) & 0x0f) * 0x0400);
+      const characterMemoryAddress = vicBankAddress + (((d018 >> 1) & 0x07) * 0x0800);
+      const bitmapMemoryAddress = vicBankAddress + (((d018 >> 3) & 0x01) * 0x2000);
+      const { graphicsMode, extendedColorMode, bitmapMode, multicolorMode } = decodeGraphicsMode(d011, d016);
+
+      const screenRam = await this.#client.readMemory(screenRamAddress, screenRamAddress + 999, 0);
+      const colorRam = await this.#client.readMemory(0xd800, 0xd800 + 999, 0);
+
+      return {
+        graphicsMode,
+        extendedColorMode,
+        bitmapMode,
+        multicolorMode,
+        vicBankAddress,
+        screenRamAddress,
+        characterMemoryAddress: bitmapMode ? null : characterMemoryAddress,
+        bitmapMemoryAddress: bitmapMode ? bitmapMemoryAddress : null,
+        colorRamAddress: 0xd800,
+        borderColor: lowNibble(d020),
+        backgroundColor0: lowNibble(d021),
+        backgroundColor1: lowNibble(d022),
+        backgroundColor2: lowNibble(d023),
+        backgroundColor3: lowNibble(d024),
+        vicRegisters: {
+          d011,
+          d016,
+          d018,
+          dd00,
+          d020,
+          d021,
+          d022,
+          d023,
+          d024,
+        },
+        screenRam: Array.from(screenRam.bytes),
+        colorRam: Array.from(colorRam.bytes, (value) => lowNibble(value)),
+      };
+    } finally {
+      await this.#settleDisplayToolState('get_display_state', previousExecutionState);
+    }
+  }
+
+  async getDisplayText() {
+    const displayState = await this.getDisplayState();
+    if (!isTextGraphicsMode(displayState.graphicsMode)) {
+      unsupportedError('get_display_text is only available when the current graphics mode is a text mode.', {
+        graphicsMode: displayState.graphicsMode,
+      });
+    }
+
+    const columns = 40;
+    const rows = 25;
+    let hasDetailedTokens = false;
+    const textLines = Array.from({ length: rows }, (_, row) => {
+      const start = row * columns;
+      return displayState.screenRam
+        .slice(start, start + columns)
+        .map((code) => {
+          const decoded = decodeScreenCodeCell(code);
+          hasDetailedTokens ||= decoded.lossy;
+          return decoded.ascii;
+        })
+        .join('')
+        .replace(/\s+$/, '');
+    });
+    const tokenLines = hasDetailedTokens
+      ? Array.from({ length: rows }, (_, row) => {
+          const start = row * columns;
+          return displayState.screenRam
+            .slice(start, start + columns)
+            .map((code) => {
+              const decoded = decodeScreenCodeCell(code);
+              return decoded.token ?? decoded.ascii;
+            })
+            .join('')
+            .replace(/\s+$/, '');
+        })
+      : undefined;
+
+    return {
+      graphicsMode: displayState.graphicsMode,
+      textMode: true,
+      lossy: hasDetailedTokens,
+      columns,
+      rows,
+      screenRamAddress: displayState.screenRamAddress,
+      textLines,
+      ...(tokenLines ? { tokenLines } : {}),
+    };
+  }
+
+  async autostartProgram(filePath: string, autoStart = true, fileIndex = 0) {
     await this.#ensureReady();
     const absolutePath = path.resolve(filePath);
     const previousExecutionState = this.#executionState;
     const previousStopReason = this.#lastStopReason;
-    const executionEvent = this.#waitForExecutionEvent(1000);
+    const executionEvent = this.#waitForExecutionEvent(EXECUTION_EVENT_WAIT_MS);
 
-    this.#lastExecutionIntent = runAfterLoading ? 'none' : 'monitor_entry';
+    this.#lastExecutionIntent = autoStart ? 'none' : 'monitor_entry';
 
     try {
-      await this.#client.autostartProgram(absolutePath, runAfterLoading, fileIndex);
+      this.#writeProcessLogLine(`[tx] program_load filePath=${absolutePath} autoStart=${autoStart} fileIndex=${fileIndex}`);
+      await this.#client.autostartProgram(absolutePath, autoStart, fileIndex);
     } catch (error) {
       const event = await executionEvent;
       const accepted = this.#autostartWasAcceptedAfterError(error, event, previousExecutionState, previousStopReason);
@@ -866,105 +1369,111 @@ export class ViceSession {
 
     const event = await executionEvent;
     if (event) {
-      this.#applyExecutionEventState(event.type);
-    } else if (this.#executionState === previousExecutionState && this.#lastStopReason === previousStopReason) {
-      this.#executionState = runAfterLoading ? 'running' : 'stopped_in_monitor';
-      this.#lastStopReason = runAfterLoading ? 'none' : 'monitor_entry';
+    } else {
+      this.#writeProcessLogLine(
+        `[autostart] no runtime event observed within ${EXECUTION_EVENT_WAIT_MS}ms, waiting ${EXECUTION_SETTLE_DELAY_MS}ms for emulator settle`,
+      );
+      await sleep(EXECUTION_SETTLE_DELAY_MS);
     }
+    await this.#settleProgramLoadState(autoStart);
 
     return {
       filePath: absolutePath,
-      runAfterLoading,
+      autoStart,
       fileIndex,
       executionState: this.#executionState,
     };
   }
 
-  async captureDisplay(useVic = true) {
-    await this.#ensurePausedForDebug();
-    const response = await this.#client.captureDisplay(useVic);
-    const warnings: WarningItem[] = [];
-    let pngBase64: string | null = null;
-
-    if (response.bitsPerPixel === 8) {
-      pngBase64 = encodePngGrayscale(response.innerWidth, response.innerHeight, response.imageBytes);
-      warnings.push(
-        makeWarning(
-          'The emulator returned indexed pixel data without palette metadata; pngBase64 uses grayscale mapping of indices.',
-          'display_palette_unknown',
-        ),
-      );
-    } else {
-      warnings.push(makeWarning(`Unsupported display bit depth ${response.bitsPerPixel}`, 'display_bpp_unsupported'));
-    }
-
-    return {
-      width: response.innerWidth,
-      height: response.innerHeight,
-      bitsPerPixel: response.bitsPerPixel,
-      debugWidth: response.debugWidth,
-      debugHeight: response.debugHeight,
-      debugOffsetX: response.debugOffsetX,
-      debugOffsetY: response.debugOffsetY,
-      pixelDataBase64: Buffer.from(response.imageBytes).toString('base64'),
-      pngBase64,
-      warnings,
-    };
-  }
-
   async writeText(text: string) {
-    await this.#ensureReady();
-    const encoded = encodePetscii(parseEscapedText(text));
+    await this.#ensureRunning('write_text');
+    const encoded = decodeWriteTextToPetscii(text);
+    this.#writeProcessLogLine(`[tx] write_text length=${encoded.length} text=${JSON.stringify(text)}`);
     await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
+    await this.#settleKeyboardFeed('write_text');
     return {
       sent: true,
       length: encoded.length,
     };
   }
 
-  async keyboardInput(action: InputAction, key: string, durationMs?: number) {
-    await this.#ensureReady();
-    const text = normalizeKeyboardKey(key);
-    const heldKey = key.trim().toUpperCase();
+  async keyboardInput(action: InputAction, keys: string[], durationMs?: number) {
+    await this.#ensureRunning('keyboard_input');
+    if (!Array.isArray(keys) || keys.length === 0 || keys.length > 4) {
+      validationError('keyboard_input requires between 1 and 4 keys', { keys });
+    }
+
+    const resolvedKeys = keys.map((key) => resolveKeyboardInputKey(key));
+    const normalizedKeys = resolvedKeys.map((key) => key.canonical);
+    this.#writeProcessLogLine(
+      `[tx] keyboard_input action=${action} keys=${normalizedKeys.join(',')}${durationMs == null ? '' : ` durationMs=${durationMs}`}`,
+    );
 
     switch (action) {
       case 'tap': {
         const duration = clampTapDuration(durationMs);
-        await this.writeText(text);
+        const bytes = Uint8Array.from(resolvedKeys.flatMap((key) => Array.from(key.bytes)));
+        await this.#client.sendKeys(Buffer.from(bytes).toString('binary'));
+        await this.#settleKeyboardFeed('keyboard_input');
         await sleep(duration);
         return {
           action,
-          key: heldKey,
+          keys: normalizedKeys,
           applied: true,
           held: false,
           mode: 'buffered_text' as const,
         };
       }
       case 'press': {
-        if (!this.#heldKeyboardIntervals.has(heldKey)) {
-          await this.writeText(text);
-          const interval = setInterval(() => {
-            void this.#client.sendKeys(Buffer.from(encodePetscii(text)).toString('binary')).catch(() => undefined);
-          }, DEFAULT_KEYBOARD_REPEAT_MS);
-          this.#heldKeyboardIntervals.set(heldKey, interval);
+        const singleByteKeys = resolvedKeys.map((key) => {
+          if (key.bytes.length !== 1) {
+            unsupportedError('keyboard_input press/release only supports keys that map to a single PETSCII byte.', {
+              key: key.canonical,
+            });
+          }
+          return key.bytes[0]!;
+        });
+        for (let index = 0; index < normalizedKeys.length; index += 1) {
+          const heldKey = normalizedKeys[index]!;
+          const byte = singleByteKeys[index]!;
+          if (!this.#heldKeyboardIntervals.has(heldKey)) {
+            await this.#client.sendKeys(Buffer.from([byte]).toString('binary'));
+            await this.#settleKeyboardFeed('keyboard_input');
+            const interval = setInterval(() => {
+              void this.#client
+                .sendKeys(Buffer.from([byte]).toString('binary'))
+                .then(() => this.#settleKeyboardFeed('keyboard_input'))
+                .catch(() => undefined);
+            }, DEFAULT_KEYBOARD_REPEAT_MS);
+            this.#heldKeyboardIntervals.set(heldKey, interval);
+          }
         }
         return {
           action,
-          key: heldKey,
+          keys: normalizedKeys,
           applied: true,
           held: true,
           mode: 'buffered_text_repeat' as const,
         };
       }
       case 'release': {
-        const interval = this.#heldKeyboardIntervals.get(heldKey);
-        if (interval) {
-          clearInterval(interval);
-          this.#heldKeyboardIntervals.delete(heldKey);
+        for (const key of resolvedKeys) {
+          if (key.bytes.length !== 1) {
+            unsupportedError('keyboard_input press/release only supports keys that map to a single PETSCII byte.', {
+              key: key.canonical,
+            });
+          }
+        }
+        for (const heldKey of normalizedKeys) {
+          const interval = this.#heldKeyboardIntervals.get(heldKey);
+          if (interval) {
+            clearInterval(interval);
+            this.#heldKeyboardIntervals.delete(heldKey);
+          }
         }
         return {
           action,
-          key: heldKey,
+          keys: normalizedKeys,
           applied: true,
           held: false,
           mode: 'buffered_text_repeat' as const,
@@ -974,11 +1483,14 @@ export class ViceSession {
   }
 
   async joystickInput(port: JoystickPort, action: InputAction, control: JoystickControl, durationMs?: number) {
-    await this.#ensureReady();
+    await this.#ensureRunning('joystick_input');
     const bit = JOYSTICK_CONTROL_BITS[control];
     if (bit == null) {
       validationError('Unsupported joystick control', { control });
     }
+    this.#writeProcessLogLine(
+      `[tx] joystick_input port=${port} action=${action} control=${control}${durationMs == null ? '' : ` durationMs=${durationMs}`}`,
+    );
 
     switch (action) {
       case 'tap': {
@@ -1010,10 +1522,22 @@ export class ViceSession {
     await this.#ensureHealthyConnection();
   }
 
-  async #ensurePausedForDebug(): Promise<void> {
+  async #ensurePausedForDebug(commandName: string): Promise<void> {
     await this.#ensureReady();
-    if (this.#executionState !== 'stopped_in_monitor') {
-      debuggerNotPausedError({
+    this.#syncMonitorRuntimeState();
+    if (this.#executionState !== 'stopped') {
+      debuggerNotPausedError(commandName, {
+        executionState: this.#executionState,
+        lastStopReason: this.#lastStopReason,
+      });
+    }
+  }
+
+  async #ensureRunning(commandName: string): Promise<void> {
+    await this.#ensureReady();
+    this.#syncMonitorRuntimeState();
+    if (this.#executionState !== 'running') {
+      emulatorNotRunningError(commandName, {
         executionState: this.#executionState,
         lastStopReason: this.#lastStopReason,
       });
@@ -1027,6 +1551,7 @@ export class ViceSession {
 
     const processAlive = this.#process != null && this.#process.exitCode == null && !this.#process.killed;
     if (processAlive && this.#client.connected) {
+      this.#syncMonitorRuntimeState();
       return;
     }
 
@@ -1079,7 +1604,7 @@ export class ViceSession {
     await this.#portAllocator.ensureFree(port, host);
 
     const binary = config.binaryPath ?? DEFAULT_C64_BINARY;
-    const args = ['-binarymonitor', '-binarymonitoraddress', `${host}:${port}`];
+    const args = ['-autostartprgmode', '1', '-binarymonitor', '-binarymonitoraddress', `${host}:${port}`];
     if (config.arguments) {
       args.push(...splitCommandLine(config.arguments));
     }
@@ -1097,9 +1622,10 @@ export class ViceSession {
     const child = spawn(binary, args, {
       cwd: config.workingDirectory ? path.resolve(config.workingDirectory) : undefined,
       env,
-      stdio: 'pipe',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.#process = child;
+    this.#attachProcessLogging(child, binary, args);
     this.#bindProcessLifecycle(child);
 
     this.#processState = 'running';
@@ -1133,12 +1659,13 @@ export class ViceSession {
     return this.#config;
   }
 
-  #bindProcessLifecycle(child: ChildProcessWithoutNullStreams): void {
+  #bindProcessLifecycle(child: ChildProcess): void {
     child.once('exit', (code, signal) => {
       if (this.#process !== child) {
         return;
       }
 
+      this.#closeProcessLog(child, `process exit (${code ?? 'null'} / ${signal ?? 'null'})`);
       this.#process = null;
       this.#processState = code === 0 ? 'exited' : 'crashed';
       this.#transportState = 'disconnected';
@@ -1157,6 +1684,7 @@ export class ViceSession {
         return;
       }
 
+      this.#closeProcessLog(child, `process error (${error.message})`);
       this.#process = null;
       this.#processState = 'crashed';
       this.#transportState = 'faulted';
@@ -1166,6 +1694,83 @@ export class ViceSession {
         void this.#scheduleRecovery();
       }
     });
+  }
+
+  #attachProcessLogging(child: ChildProcess, binary: string, args: string[]): void {
+    const logStream = createWriteStream(VICE_PROCESS_LOG_PATH, { flags: 'a' });
+    this.#processLogStream = logStream;
+    this.#stdoutMirrorBuffer = '';
+    this.#stderrMirrorBuffer = '';
+
+    logStream.write(`\n=== VICE launch ${nowIso()} ===\n`);
+    logStream.write(`binary: ${binary}\n`);
+    logStream.write(`args: ${args.join(' ')}\n`);
+
+    child.stdout?.pipe(logStream, { end: false });
+    child.stderr?.pipe(logStream, { end: false });
+
+    if (MIRROR_VICE_LOGS_TO_STDERR) {
+      child.stdout?.on('data', (chunk) => {
+        this.#mirrorViceOutputChunk('stdout', chunk);
+      });
+      child.stderr?.on('data', (chunk) => {
+        this.#mirrorViceOutputChunk('stderr', chunk);
+      });
+    }
+  }
+
+  #closeProcessLog(child: ChildProcess, reason: string): void {
+    const logStream = this.#processLogStream;
+    if (!logStream) {
+      return;
+    }
+
+    child.stdout?.unpipe(logStream);
+    child.stderr?.unpipe(logStream);
+    this.#flushViceOutputMirror('stdout');
+    this.#flushViceOutputMirror('stderr');
+    logStream.write(`\n=== VICE stream closed ${nowIso()} (${reason}) ===\n`);
+    logStream.end();
+    this.#processLogStream = null;
+  }
+
+  #mirrorViceOutputChunk(stream: 'stdout' | 'stderr', chunk: unknown): void {
+    const text = String(chunk);
+    const buffer = stream === 'stdout' ? this.#stdoutMirrorBuffer : this.#stderrMirrorBuffer;
+    const combined = buffer + text;
+    const lines = combined.split(/\r?\n/);
+    const remainder = lines.pop() ?? '';
+
+    for (const line of lines) {
+      process.stderr.write(`[vice ${stream}] ${line}\n`);
+    }
+
+    if (stream === 'stdout') {
+      this.#stdoutMirrorBuffer = remainder;
+    } else {
+      this.#stderrMirrorBuffer = remainder;
+    }
+  }
+
+  #flushViceOutputMirror(stream: 'stdout' | 'stderr'): void {
+    const remainder = stream === 'stdout' ? this.#stdoutMirrorBuffer : this.#stderrMirrorBuffer;
+    if (!remainder) {
+      return;
+    }
+
+    process.stderr.write(`[vice ${stream}] ${remainder}\n`);
+    if (stream === 'stdout') {
+      this.#stdoutMirrorBuffer = '';
+    } else {
+      this.#stderrMirrorBuffer = '';
+    }
+  }
+
+  #writeProcessLogLine(line: string): void {
+    this.#processLogStream?.write(`${nowIso()} ${line}\n`);
+    if (MIRROR_VICE_LOGS_TO_STDERR) {
+      process.stderr.write(`[vice monitor] ${line}\n`);
+    }
   }
 
   async #stopManagedProcess(fullReset: boolean): Promise<void> {
@@ -1205,19 +1810,31 @@ export class ViceSession {
     }
   }
 
-  async #hydrateExecutionState(): Promise<void> {
-    try {
-      const registers = await this.#readRegisters();
-      if (Object.keys(registers).length > 0) {
-        this.#executionState = 'stopped_in_monitor';
-        this.#lastStopReason = 'monitor_entry';
-        return;
-      }
-    } catch {
-      this.#warnings.push(makeWarning('Could not determine initial execution state', 'execution_state_unknown'));
+  async #resumeBeforeShutdown(): Promise<void> {
+    if (!this.#client.connected) {
+      return;
     }
 
-    this.#executionState = 'unknown';
+    this.#syncMonitorRuntimeState();
+    if (this.#executionState !== 'stopped') {
+      return;
+    }
+
+    this.#writeProcessLogLine('[shutdown] emulator stopped in monitor, resuming before quit');
+    try {
+      this.#lastExecutionIntent = 'unknown';
+      await this.#client.continueExecution();
+      await this.#waitForExecutionEvent(1000);
+      this.#syncMonitorRuntimeState();
+    } catch (error) {
+      this.#writeProcessLogLine(
+        `[shutdown] resume before quit failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async #hydrateExecutionState(): Promise<void> {
+    await this.#stabilizeLaunchExecutionState();
   }
 
   async #readRegisters(): Promise<C64RegisterValues> {
@@ -1230,35 +1847,7 @@ export class ViceSession {
 
   async #readDebugState(): Promise<DebugState> {
     const registers = await this.#readRegisters();
-    this.#executionState = 'stopped_in_monitor';
     return this.#buildDebugState(registers);
-  }
-
-  async #pauseExecution(): Promise<{
-    executionState: SessionState['executionState'];
-    lastStopReason: StopReason;
-    programCounter: number;
-    registers: C64RegisterValues;
-    warnings: WarningItem[];
-  }> {
-    await this.#ensureReady();
-
-    if (this.#executionState === 'stopped_in_monitor') {
-      const debugState = this.#lastRegisters ? this.#buildDebugState(this.#lastRegisters) : await this.#readDebugState();
-      return {
-        ...debugState,
-        warnings: [],
-      };
-    }
-
-    this.#lastExecutionIntent = 'manual_break';
-    const debugState = await this.#readDebugState();
-    this.#lastStopReason = 'manual_break';
-    return {
-      ...debugState,
-      lastStopReason: 'manual_break',
-      warnings: [],
-    };
   }
 
   #buildDebugState(registers: C64RegisterValues): DebugState {
@@ -1367,17 +1956,6 @@ export class ViceSession {
     }
   }
 
-  #applyExecutionEventState(eventType: 'resumed' | 'stopped' | 'jam'): void {
-    if (eventType === 'resumed') {
-      this.#executionState = 'running';
-      this.#lastStopReason = 'none';
-      return;
-    }
-
-    this.#executionState = 'stopped_in_monitor';
-    this.#lastStopReason = eventType === 'jam' ? 'error' : this.#lastExecutionIntent;
-  }
-
   async #waitForExecutionEvent(timeoutMs: number): Promise<{ type: 'resumed' | 'stopped' | 'jam' } | null> {
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -1396,6 +1974,248 @@ export class ViceSession {
 
       this.#client.on('event', onEvent);
     });
+  }
+
+  async #stabilizeLaunchExecutionState(): Promise<void> {
+    this.#writeProcessLogLine(`[bootstrap] waiting ${BOOTSTRAP_INITIAL_DELAY_MS}ms before probing launch state`);
+    await sleep(BOOTSTRAP_INITIAL_DELAY_MS);
+
+    const deadline = Date.now() + BOOTSTRAP_SETTLE_TIMEOUT_MS;
+    let runningSince: number | null = null;
+    let lastResumeAt = 0;
+
+    while (true) {
+      this.#syncMonitorRuntimeState();
+
+      if (this.#executionState === 'running') {
+        runningSince ??= Date.now();
+        if (Date.now() - runningSince >= BOOTSTRAP_RUNNING_STABLE_MS) {
+          this.#writeProcessLogLine('[bootstrap] emulator reached stable running state after launch');
+          return;
+        }
+      } else {
+        runningSince = null;
+      }
+
+      if (this.#executionState !== 'running' && Date.now() - lastResumeAt >= BOOTSTRAP_RESUME_COOLDOWN_MS) {
+        this.#writeProcessLogLine(`[bootstrap] observed ${this.#executionState} state after launch, sending resume`);
+        const previousExecutionState = this.#executionState;
+        const previousStopReason = this.#lastStopReason;
+        const executionEvent = this.#waitForExecutionEvent(EXECUTION_EVENT_WAIT_MS);
+
+        this.#lastExecutionIntent = 'unknown';
+
+        try {
+          await this.#client.continueExecution();
+        } catch (error) {
+          const event = await executionEvent;
+          const accepted = this.#resumeWasAcceptedAfterError(error, event, previousExecutionState, previousStopReason);
+          if (!accepted) {
+            this.#writeProcessLogLine(
+              `[bootstrap] resume after launch failed without runtime transition: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            throw error;
+          }
+        }
+
+        const event = await executionEvent;
+        if (!event) {
+          this.#writeProcessLogLine(
+            `[bootstrap] no runtime event observed within ${EXECUTION_EVENT_WAIT_MS}ms after resume, waiting ${BOOTSTRAP_POLL_MS}ms`,
+          );
+          await sleep(BOOTSTRAP_POLL_MS);
+        }
+        lastResumeAt = Date.now();
+        continue;
+      }
+
+      if (Date.now() >= deadline) {
+        this.#writeProcessLogLine(
+          `[bootstrap] settle timeout reached after ${BOOTSTRAP_SETTLE_TIMEOUT_MS}ms with executionState=${this.#executionState}`,
+        );
+        throw new ViceMcpError(
+          'bootstrap_timeout',
+          'Emulator launch did not reach a stable running state before timeout.',
+          'timeout',
+          true,
+          {
+            executionState: this.#executionState,
+            lastStopReason: this.#lastStopReason,
+          },
+        );
+      }
+
+      await sleep(BOOTSTRAP_POLL_MS);
+    }
+  }
+
+  async #settleProgramLoadState(autoStart: boolean): Promise<void> {
+    const deadline = Date.now() + PROGRAM_LOAD_SETTLE_TIMEOUT_MS;
+    let runningSince: number | null = null;
+    let lastResumeAt = 0;
+
+    while (true) {
+      this.#syncMonitorRuntimeState();
+
+      if (this.#executionState === 'running') {
+        runningSince ??= Date.now();
+        if (Date.now() - runningSince >= PROGRAM_LOAD_RUNNING_STABLE_MS) {
+          return;
+        }
+      } else {
+        runningSince = null;
+      }
+
+      if (this.#executionState === 'stopped' && Date.now() - lastResumeAt >= PROGRAM_LOAD_RESUME_COOLDOWN_MS) {
+        this.#writeProcessLogLine(
+          `[autostart] observed stopped state after load with autoStart=${autoStart}, sending resume`,
+        );
+        this.#lastExecutionIntent = 'unknown';
+        await this.#client.continueExecution();
+        lastResumeAt = Date.now();
+      }
+
+      if (Date.now() >= deadline) {
+        this.#writeProcessLogLine(
+          `[autostart] settle timeout reached after ${PROGRAM_LOAD_SETTLE_TIMEOUT_MS}ms with executionState=${this.#executionState}`,
+        );
+        return;
+      }
+
+      await sleep(PROGRAM_LOAD_SETTLE_POLL_MS);
+    }
+  }
+
+  async #pauseForDisplayInspection(commandName: string, previousExecutionState: SessionState['executionState']): Promise<void> {
+    if (previousExecutionState === 'stopped') {
+      return;
+    }
+
+    if (previousExecutionState !== 'running') {
+      emulatorNotRunningError(commandName, {
+        executionState: previousExecutionState,
+        lastStopReason: this.#lastStopReason,
+      });
+    }
+
+    this.#writeProcessLogLine(`[display] ${commandName} started while running, waiting for a temporary stop`);
+    await this.#client.setBreakpoint({
+      start: 0x0000,
+      end: 0xffff,
+      kind: 'exec',
+      temporary: true,
+      enabled: true,
+      stopWhenHit: true,
+    });
+
+    const deadline = Date.now() + DISPLAY_PAUSE_TIMEOUT_MS;
+    while (true) {
+      this.#syncMonitorRuntimeState();
+      if (this.#executionState === 'stopped') {
+        return;
+      }
+      if (Date.now() >= deadline) {
+        throw new ViceMcpError(
+          'display_pause_timeout',
+          `${commandName} could not reach a temporary stopped state before timeout.`,
+          'timeout',
+          true,
+          {
+            commandName,
+            executionState: this.#executionState,
+            lastStopReason: this.#lastStopReason,
+          },
+        );
+      }
+      await sleep(DISPLAY_SETTLE_POLL_MS);
+    }
+  }
+
+  async #settleDisplayToolState(commandName: string, previousExecutionState: SessionState['executionState']): Promise<void> {
+    this.#syncMonitorRuntimeState();
+    if (previousExecutionState !== 'running') {
+      return;
+    }
+
+    const deadline = Date.now() + DISPLAY_SETTLE_TIMEOUT_MS;
+    let runningSince: number | null = null;
+    let lastResumeAt = 0;
+
+    while (true) {
+      this.#syncMonitorRuntimeState();
+
+      if (this.#executionState === 'running') {
+        runningSince ??= Date.now();
+        if (Date.now() - runningSince >= DISPLAY_RUNNING_STABLE_MS) {
+          return;
+        }
+      } else {
+        runningSince = null;
+      }
+
+      if (this.#executionState === 'stopped' && Date.now() - lastResumeAt >= DISPLAY_RESUME_COOLDOWN_MS) {
+        this.#writeProcessLogLine(`[display] observed stopped state after ${commandName}, sending resume`);
+        this.#lastExecutionIntent = 'unknown';
+        await this.#client.continueExecution();
+        lastResumeAt = Date.now();
+      }
+
+      if (Date.now() >= deadline) {
+        this.#writeProcessLogLine(
+          `[display] settle timeout reached after ${DISPLAY_SETTLE_TIMEOUT_MS}ms after ${commandName} with executionState=${this.#executionState}`,
+        );
+        if (this.#executionState !== 'running') {
+          emulatorNotRunningError(commandName, {
+            executionState: this.#executionState,
+            lastStopReason: this.#lastStopReason,
+          });
+        }
+        return;
+      }
+
+      await sleep(DISPLAY_SETTLE_POLL_MS);
+    }
+  }
+
+  async #settleKeyboardFeed(commandName: string): Promise<void> {
+    const deadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
+    let runningSince: number | null = null;
+    let lastResumeAt = 0;
+
+    while (true) {
+      this.#syncMonitorRuntimeState();
+
+      if (this.#executionState === 'running') {
+        runningSince ??= Date.now();
+        if (Date.now() - runningSince >= INPUT_RUNNING_STABLE_MS) {
+          return;
+        }
+      } else {
+        runningSince = null;
+      }
+
+      if (this.#executionState === 'stopped' && Date.now() - lastResumeAt >= INPUT_RESUME_COOLDOWN_MS) {
+        this.#writeProcessLogLine(`[input] observed stopped state after ${commandName}, sending resume`);
+        this.#lastExecutionIntent = 'unknown';
+        await this.#client.continueExecution();
+        lastResumeAt = Date.now();
+      }
+
+      if (Date.now() >= deadline) {
+        this.#writeProcessLogLine(
+          `[input] settle timeout reached after ${INPUT_SETTLE_TIMEOUT_MS}ms with executionState=${this.#executionState}`,
+        );
+        if (this.#executionState !== 'running') {
+          emulatorNotRunningError(commandName, {
+            executionState: this.#executionState,
+            lastStopReason: this.#lastStopReason,
+          });
+        }
+        return;
+      }
+
+      await sleep(INPUT_SETTLE_POLL_MS);
+    }
   }
 
   #autostartWasAcceptedAfterError(
@@ -1417,6 +2237,54 @@ export class ViceSession {
     }
 
     return this.#executionState !== previousExecutionState || this.#lastStopReason !== previousStopReason;
+  }
+
+  #resumeWasAcceptedAfterError(
+    error: unknown,
+    event: { type: 'resumed' | 'stopped' | 'jam' } | null,
+    previousExecutionState: SessionState['executionState'],
+    previousStopReason: StopReason,
+  ): boolean {
+    if (!(error instanceof ViceMcpError)) {
+      return false;
+    }
+
+    if (!['emulator_protocol_error', 'timeout', 'connection_closed'].includes(error.code)) {
+      return false;
+    }
+
+    if (event) {
+      this.#writeProcessLogLine(
+        `[bootstrap] resume probe accepted after ${error.code} because monitor reported ${event.type}`,
+      );
+      return true;
+    }
+
+    return this.#executionState !== previousExecutionState || this.#lastStopReason !== previousStopReason;
+  }
+
+  #syncMonitorRuntimeState(): void {
+    const runtime = this.#client.runtimeState();
+    const eventType = runtime.lastEventType;
+
+    this.#executionState = runtime.runtimeKnown && eventType === 'resumed' ? 'running' : runtime.runtimeKnown ? 'stopped' : 'unknown';
+    this.#lastStopReason = this.#stopReasonFromMonitorEvent(eventType);
+    this.#writeProcessLogLine(
+      `[monitor-state] executionState=${this.#executionState} lastStopReason=${this.#lastStopReason} runtimeKnown=${runtime.runtimeKnown} lastEventType=${eventType}${runtime.programCounter == null ? '' : ` pc=$${runtime.programCounter.toString(16).padStart(4, '0')}`}`,
+    );
+  }
+
+  #stopReasonFromMonitorEvent(eventType: MonitorRuntimeEventType): StopReason {
+    switch (eventType) {
+      case 'resumed':
+        return 'none';
+      case 'stopped':
+        return this.#lastExecutionIntent;
+      case 'jam':
+        return 'error';
+      case 'unknown':
+        return 'unknown';
+    }
   }
 
 }
@@ -1474,7 +2342,7 @@ async function waitForMonitor(host: string, port: number, timeoutMs: number): Pr
   });
 }
 
-async function waitForProcessExit(process: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+async function waitForProcessExit(process: ChildProcess, timeoutMs: number): Promise<void> {
   if (process.exitCode != null) {
     return;
   }
