@@ -21,14 +21,13 @@ export const transportStateSchema = z.enum([
 ]);
 
 export const processStateSchema = z.enum(['not_applicable', 'launching', 'running', 'exited', 'crashed']);
-export const executionStateSchema = z.enum(['unknown', 'running', 'paused', 'stopped_in_monitor']);
+export const executionStateSchema = z.enum(['unknown', 'running', 'stopped']);
 export const stopReasonSchema = z.enum([
   'none',
   'breakpoint',
   'watchpoint_read',
   'watchpoint_write',
   'step_complete',
-  'manual_break',
   'reset',
   'monitor_entry',
   'program_end',
@@ -38,7 +37,6 @@ export const stopReasonSchema = z.enum([
 export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready', 'recovering', 'stopped', 'error']);
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
 export const resetModeSchema = z.enum(['soft', 'hard']);
-export const programLoadModeSchema = z.enum(['memory', 'autostart']);
 export const inputActionSchema = z.enum(['press', 'release', 'tap']);
 export const joystickControlSchema = z.enum(['up', 'down', 'left', 'right', 'fire']);
 export const joystickPortSchema = z.union([z.literal(1), z.literal(2)]);
@@ -76,7 +74,6 @@ export type StopReason = z.infer<typeof stopReasonSchema>;
 export type SessionHealth = z.infer<typeof sessionHealthSchema>;
 export type BreakpointKind = z.infer<typeof breakpointKindSchema>;
 export type ResetMode = z.infer<typeof resetModeSchema>;
-export type ProgramLoadMode = z.infer<typeof programLoadModeSchema>;
 export type InputAction = z.infer<typeof inputActionSchema>;
 export type JoystickControl = z.infer<typeof joystickControlSchema>;
 export type JoystickPort = z.infer<typeof joystickPortSchema>;
@@ -112,6 +109,10 @@ export interface SessionState {
   processState: ProcessState;
   executionState: ExecutionState;
   lastStopReason: StopReason;
+  idleAutoResumeArmed: boolean;
+  explicitPauseActive: boolean;
+  lastCheckpointId: number | null;
+  lastCheckpointKind: BreakpointKind | null;
   recoveryInProgress: boolean;
   launchId: number;
   restartCount: number;

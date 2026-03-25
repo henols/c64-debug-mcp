@@ -29,14 +29,7 @@ try {
   const autostart = unwrap(
     await client.callTool({
       name: 'program_load',
-      arguments: { filePath: targetPrg, mode: 'autostart', runAfterLoading: true, fileIndex: 0 },
-    }),
-  );
-
-  const pause = unwrap(
-    await client.callTool({
-      name: 'execute',
-      arguments: { action: 'pause', count: 1, resetMode: 'soft' },
+      arguments: { filePath: targetPrg, autoStart: false, fileIndex: 0 },
     }),
   );
 
@@ -75,16 +68,23 @@ try {
     }),
   );
 
+  const resumed = unwrap(
+    await client.callTool({
+      name: 'execute',
+      arguments: { action: 'resume', count: 1, resetMode: 'soft' },
+    }),
+  );
+
   console.log(
     JSON.stringify(
       {
         autostart,
-        pause,
         createdBreakpoint,
         listedBreakpoints,
         step,
         clearedBreakpoint,
         breakpointsAfterClear,
+        resumed,
       },
       null,
       2,

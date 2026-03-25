@@ -26,7 +26,9 @@ import {
   monitorStateSchema,
   programLoadResultSchema,
   captureDisplayResultSchema,
+  sessionStateResultSchema,
   toolOutputSchema,
+  waitForStateResultSchema,
   warningSchema,
 } from './schemas.js';
 import { ViceSession } from './session.js';
@@ -96,10 +98,18 @@ function normalizeBreakpoint(
 
 const getMonitorStateTool = createViceTool({
   id: 'get_monitor_state',
-  description: 'Returns the current monitor/runtime state in any connected state.',
+  description: 'Returns whether the C64 is running or stopped, along with the current stop reason and program counter when available.',
   inputSchema: noInputSchema,
   dataSchema: monitorStateSchema,
   execute: async () => await viceSession.getMonitorState(),
+});
+
+const getSessionStateTool = createViceTool({
+  id: 'get_session_state',
+  description: 'Returns richer emulator session state including transport/process status, auto-resume state, and the most recent hit checkpoint when known.',
+  inputSchema: noInputSchema,
+  dataSchema: sessionStateResultSchema,
+  execute: async () => viceSession.snapshot(),
 });
 
 const getRegistersTool = createViceTool({
@@ -127,7 +137,7 @@ const setRegistersTool = createViceTool({
 
 const readMemoryTool = createViceTool({
   id: 'memory_read',
-  description: 'Reads an inclusive memory range and returns raw bytes as a JSON array.',
+  description: 'Reads a memory chunk by start address and length and returns raw bytes as a JSON array.',
   inputSchema: z
     .object({
       address: address16Schema.describe('Start address in the 16-bit C64 address space'),
@@ -174,17 +184,30 @@ const writeMemoryTool = createViceTool({
 
 const executeTool = createViceTool({
   id: 'execute',
-  description: 'Controls execution with resume, step, step_over, step_out, or reset.',
+  description: 'Controls execution with pause, resume, step, step_over, step_out, or reset. Resume can optionally wait until running becomes stable.',
   inputSchema: z.object({
-    action: z.enum(['resume', 'step', 'step_over', 'step_out', 'reset']),
+    action: z.enum(['pause', 'resume', 'step', 'step_over', 'step_out', 'reset']),
     count: z.number().int().positive().default(1).describe('Instruction count for step and step_over actions'),
     resetMode: resetModeSchema.default('soft').describe('Reset mode when action is reset'),
+    waitUntilRunningStable: z.boolean().default(false).describe('When action is resume, wait until running becomes stable before returning'),
   }),
   dataSchema: debugStateSchema.extend({
     stepsExecuted: z.number().int().positive().optional(),
     warnings: z.array(warningSchema),
   }),
-  execute: async (input) => await viceSession.execute(input.action, input.count, input.resetMode),
+  execute: async (input) => await viceSession.execute(input.action, input.count, input.resetMode, input.waitUntilRunningStable),
+});
+
+const waitForStateTool = createViceTool({
+  id: 'wait_for_state',
+  description: 'Waits for the emulator to reach a target execution state and optionally remain there for a stability window.',
+  inputSchema: z.object({
+    executionState: z.enum(['running', 'stopped']).describe('Target execution state to wait for'),
+    timeoutMs: z.number().int().positive().default(5000).describe('Maximum time to wait before returning'),
+    stableMs: z.number().int().nonnegative().optional().describe('Optional stability window the target state must remain true before returning'),
+  }),
+  dataSchema: waitForStateResultSchema,
+  execute: async (input) => await viceSession.waitForState(input.executionState, input.timeoutMs, input.stableMs),
 });
 
 const listBreakpointsTool = createViceTool({
@@ -254,7 +277,7 @@ const breakpointClearTool = createViceTool({
 
 const programLoadTool = createViceTool({
   id: 'program_load',
-  description: 'Loads a C64 program through the VICE binary monitor autostart command.',
+  description: 'Loads a C64 program and optionally starts it.',
   inputSchema: z.object({
     filePath: z.string(),
     autoStart: z.boolean().default(true).describe('Whether the loaded program should be started immediately after loading'),
@@ -266,7 +289,7 @@ const programLoadTool = createViceTool({
 
 const captureDisplayTool = createViceTool({
   id: 'capture_display',
-  description: 'Captures the current display, renders the visible screen to a PNG file, and returns the saved image path. It preserves the running/stopped state it started in.',
+  description: 'Captures the current screen to a PNG file and returns the saved image path. If the emulator was running, the server restores running state before returning, subject to timeout.',
   inputSchema: z.object({
     useVic: z.boolean().default(true).describe('Whether to capture the VIC-II display when supported'),
   }),
@@ -276,7 +299,7 @@ const captureDisplayTool = createViceTool({
 
 const getDisplayStateTool = createViceTool({
   id: 'get_display_state',
-  description: 'Returns screen RAM, color RAM, active graphics mode, VIC memory pointers, and current background and border colors. It preserves the running/stopped state it started in.',
+  description: 'Returns screen RAM, color RAM, the current graphics mode, screen memory addresses, and the current border and background colors. If the emulator was running, the server restores running state before returning, subject to timeout.',
   inputSchema: noInputSchema,
   dataSchema: displayStateResultSchema,
   execute: async () => await viceSession.getDisplayState(),
@@ -284,7 +307,7 @@ const getDisplayStateTool = createViceTool({
 
 const getDisplayTextTool = createViceTool({
   id: 'get_display_text',
-  description: 'Decodes screen RAM to approximate ASCII text when the current graphics mode is a text mode. It preserves the running/stopped state it started in.',
+  description: 'Returns the current text screen as readable text when the C64 is in a text mode. If the emulator was running, the server restores running state before returning, subject to timeout.',
   inputSchema: noInputSchema,
   dataSchema: displayTextResultSchema,
   execute: async () => await viceSession.getDisplayText(),
@@ -292,7 +315,8 @@ const getDisplayTextTool = createViceTool({
 
 const writeTextTool = createViceTool({
   id: 'write_text',
-  description: 'Writes text to the emulator keyboard buffer while the emulator is running, supporting escaped characters and PETSCII brace tokens like {RETURN}, {CLR}, {HOME}, {PI}, and color names.',
+  description:
+    'Types text into the C64 while it is running. Supports escaped characters and PETSCII brace tokens like {RETURN}, {CLR}, {HOME}, {PI}, and color names; limit each request to 64 bytes.',
   inputSchema: z.object({
     text: z.string(),
   }),
@@ -305,7 +329,7 @@ const writeTextTool = createViceTool({
 
 const keyboardInputTool = createViceTool({
   id: 'keyboard_input',
-  description: 'Applies buffered keyboard input while the emulator is running using up to four literal keys or PETSCII token names such as RETURN, CLR, HOME, PI, or color names. This is keyboard-buffer input, not real key-matrix control.',
+  description: 'Sends one to four keys or PETSCII tokens to the C64 while it is running. Use this for key presses, releases, and taps. If the emulator transiently stops, the server restores running state before returning, subject to timeout.',
   inputSchema: z.object({
     action: inputActionSchema.describe('Use tap for a single key event or press/release for repeated buffered input'),
     keys: z.array(z.string().min(1)).min(1).max(4).describe('One to four literal keys or PETSCII token names such as RETURN, CLR, HOME, PI, LEFT, RED, or F1'),
@@ -317,7 +341,7 @@ const keyboardInputTool = createViceTool({
 
 const joystickInputTool = createViceTool({
   id: 'joystick_input',
-  description: 'Applies joystick input while the emulator is running on C64 joystick port 1 or 2 with press, release, or tap semantics.',
+  description: 'Sends joystick input to C64 joystick port 1 or 2 while the C64 is running. If the emulator transiently stops, the server restores running state before returning, subject to timeout.',
   inputSchema: z.object({
     port: joystickPortSchema.describe('Joystick port number'),
     action: inputActionSchema.describe('Joystick action to apply'),
@@ -332,16 +356,17 @@ export const viceDebugServer = new MCPServer({
   id: 'c64-debug-mcp',
   name: 'c64 debugger',
   version: '0.1.0',
-  description: 'Structured Mastra MCP server for C64 debugging through x64sc with a self-healing managed emulator.',
-  instructions:
-    'This server is C64-only and always targets x64sc. The server owns emulator launch, restart, connection recovery, and monitor port management; use the debugger tools directly.',
+  description: 'MCP server for C64 debugging and interaction.',
+  instructions: 'This server is for C64 debugging. Use the tools directly to inspect, control, and interact with the C64.',
   tools: {
     get_monitor_state: getMonitorStateTool,
+    get_session_state: getSessionStateTool,
     get_registers: getRegistersTool,
     set_registers: setRegistersTool,
     memory_read: readMemoryTool,
     memory_write: writeMemoryTool,
     execute: executeTool,
+    wait_for_state: waitForStateTool,
     list_breakpoints: listBreakpointsTool,
     breakpoint_set: breakpointSetTool,
     breakpoint_clear: breakpointClearTool,

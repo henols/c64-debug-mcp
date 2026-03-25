@@ -29,13 +29,23 @@ export function validationError(message: string, details?: Record<string, unknow
   throw new ViceMcpError('validation_error', message, 'validation', false, details);
 }
 
-export function debuggerNotPausedError(details?: Record<string, unknown>): never {
+export function debuggerNotPausedError(commandName: string, details?: Record<string, unknown>): never {
   throw new ViceMcpError(
     'debugger_not_paused',
-    'Debugger tools require the emulator to be paused first. Call execute(action="pause") before reading or mutating debug state.',
+    `${commandName} can only be executed when the emulator is stopped.`,
     'session_state',
     false,
-    details,
+    { commandName, requiredState: 'stopped', ...details },
+  );
+}
+
+export function emulatorNotRunningError(commandName: string, details?: Record<string, unknown>): never {
+  throw new ViceMcpError(
+    'emulator_not_running',
+    `${commandName} can only be executed when the emulator is running.`,
+    'session_state',
+    false,
+    { commandName, requiredState: 'running', ...details },
   );
 }
 
@@ -66,10 +76,14 @@ function zodDetails(error: ZodError): Record<string, unknown> {
 function publicMessageFor(error: ViceMcpError): string {
   switch (error.code) {
     case 'debugger_not_paused':
-      return 'Debugger tools require the emulator to be paused first. Call execute(action="pause") before reading or mutating debug state.';
+      return error.message;
+    case 'emulator_not_running':
+      return error.message;
     case 'validation_error':
     case 'invalid_prg':
     case 'unsupported':
+    case 'program_file_missing':
+    case 'program_file_invalid':
       return error.message;
     case 'port_allocation_failed':
     case 'port_in_use':
@@ -110,6 +124,7 @@ function publicDetailsFor(error: ViceMcpError): Record<string, unknown> | undefi
     case 'validation':
     case 'session_state':
     case 'unsupported':
+    case 'io':
       return error.details;
     default:
       return undefined;

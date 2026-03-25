@@ -7,11 +7,18 @@
     "node": ">=22.13.0"
   },
   "bin": {
-    "vice-debug-mcp": "dist/stdio.js"
+    "vice-debug-mcp": "dist/stdio.js",
+    "vice-debug-mcp-http": "dist/http.js"
   },
   "scripts": {
-    "build": "tsup src/stdio.ts --format esm,cjs --dts --no-splitting --clean",
-    "check": "tsc --noEmit"
+    "build": "tsup src/stdio.ts src/http.ts --format esm,cjs --dts --no-splitting --clean",
+    "check": "tsc --noEmit",
+    "dev:http": "VICE_DEBUG_CONSOLE_LOGS=1 /home/henrik/.nvm/versions/node/v22.13.0/bin/node ../../node_modules/tsx/dist/cli.mjs watch src/http.ts",
+    "smoke:http": "node tests/smoke-http.mjs",
+    "smoke:http:dev": "VICE_DEBUG_HTTP_URL=http://127.0.0.1:39080/mcp node tests/smoke-http.mjs",
+    "test:http:live": "bash ../../scripts/test-live-http.sh basic",
+    "test:http:live:advanced": "bash ../../scripts/test-live-http.sh advanced",
+    "test:http:live:tools": "bash ../../scripts/test-live-http.sh tools"
   },
   "dependencies": {
     "@mastra/core": "^1.15.0",
@@ -22,6 +29,7 @@
   "devDependencies": {
     "@types/node": "^24.3.0",
     "tsup": "^8.3.5",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.2"
   }
 }

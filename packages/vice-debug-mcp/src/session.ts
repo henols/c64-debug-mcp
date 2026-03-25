@@ -575,11 +575,14 @@ const DISPLAY_SETTLE_TIMEOUT_MS = 5000;
 const DISPLAY_SETTLE_POLL_MS = 100;
 const DISPLAY_PAUSE_TIMEOUT_MS = 5000;
 const DISPLAY_RUNNING_STABLE_MS = 750;
+const MAX_WRITE_TEXT_BYTES = 64;
 const DISPLAY_RESUME_COOLDOWN_MS = 250;
 const INPUT_SETTLE_TIMEOUT_MS = 5000;
 const INPUT_SETTLE_POLL_MS = 100;
 const INPUT_RUNNING_STABLE_MS = 750;
 const INPUT_RESUME_COOLDOWN_MS = 250;
+const CHECKPOINT_HIT_SETTLE_MS = 1000;
+const STOPPED_IDLE_TIMEOUT_MS = 20_000;
 
 function clampTapDuration(durationMs: number | undefined): number {
   if (durationMs == null) {
@@ -688,6 +691,12 @@ type MonitorState = {
   programCounter: number | null;
 };
 
+type CheckpointHitState = {
+  id: number;
+  kind: BreakpointKind;
+  observedAt: number;
+};
+
 type BreakpointWithOptionalLabel = {
   id: number;
   start: number;
@@ -722,6 +731,8 @@ export class ViceSession {
   #warnings: WarningItem[] = [];
   #lastExecutionIntent: StopReason = 'unknown';
   #lastRegisters: C64RegisterValues | null = null;
+  #lastRuntimeEventType: MonitorRuntimeEventType = 'unknown';
+  #lastRuntimeProgramCounter: number | null = null;
   #config: C64Config | null = null;
   #recoveryInProgress = false;
   #recoveryPromise: Promise<void> | null = null;
@@ -733,6 +744,11 @@ export class ViceSession {
   #heldKeyboardIntervals = new Map<string, NodeJS.Timeout>();
   #heldJoystickMasks = new Map<JoystickPort, number>();
   #breakpointLabels = new Map<number, string>();
+  #stoppedAt: number | null = null;
+  #autoResumeTimer: NodeJS.Timeout | null = null;
+  #explicitPauseActive = false;
+  #pendingCheckpointHit: CheckpointHitState | null = null;
+  #lastCheckpointHit: CheckpointHitState | null = null;
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
@@ -751,6 +767,13 @@ export class ViceSession {
       }
     });
     this.#client.on('event', (event) => {
+      if (event.type === 'checkpoint_info' && event.checkpoint.currentlyHit) {
+        this.#pendingCheckpointHit = {
+          id: event.checkpoint.id,
+          kind: event.checkpoint.kind,
+          observedAt: Date.now(),
+        };
+      }
       const programCounter = 'programCounter' in event && typeof event.programCounter === 'number' ? event.programCounter : null;
       this.#writeProcessLogLine(
         `[monitor-event] type=${event.type}${programCounter == null ? '' : ` pc=$${programCounter.toString(16).padStart(4, '0')}`}`,
@@ -765,6 +788,10 @@ export class ViceSession {
       processState: this.#processState,
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
+      idleAutoResumeArmed: this.#autoResumeTimer != null,
+      explicitPauseActive: this.#explicitPauseActive,
+      lastCheckpointId: this.#lastCheckpointHit?.id ?? null,
+      lastCheckpointKind: this.#lastCheckpointHit?.kind ?? null,
       recoveryInProgress: this.#recoveryInProgress,
       launchId: this.#launchId,
       restartCount: this.#restartCount,
@@ -801,6 +828,7 @@ export class ViceSession {
     }
 
     this.#shuttingDown = true;
+    this.#clearIdleAutoResume();
     this.#suppressRecovery = true;
     this.#config = null;
     this.#recoveryPromise = null;
@@ -817,6 +845,11 @@ export class ViceSession {
       this.#processState = 'not_applicable';
       this.#executionState = 'unknown';
       this.#lastStopReason = 'none';
+      this.#explicitPauseActive = false;
+      this.#pendingCheckpointHit = null;
+      this.#lastCheckpointHit = null;
+      this.#lastRuntimeEventType = 'unknown';
+      this.#lastRuntimeProgramCounter = null;
       this.#host = null;
       this.#port = null;
       this.#connectedSince = null;
@@ -834,10 +867,17 @@ export class ViceSession {
     return meta;
   }
 
-  async execute(action: 'resume' | 'step' | 'step_over' | 'step_out' | 'reset', count = 1, resetMode: 'soft' | 'hard' = 'soft') {
+  async execute(
+    action: 'pause' | 'resume' | 'step' | 'step_over' | 'step_out' | 'reset',
+    count = 1,
+    resetMode: 'soft' | 'hard' = 'soft',
+    waitUntilRunningStable = false,
+  ) {
     switch (action) {
+      case 'pause':
+        return await this.pauseExecution();
       case 'resume':
-        return await this.continueExecution();
+        return await this.continueExecution(waitUntilRunningStable);
       case 'step':
         return await this.stepInstruction(count, false);
       case 'step_over':
@@ -951,7 +991,51 @@ export class ViceSession {
     };
   }
 
-  async continueExecution() {
+  async pauseExecution() {
+    await this.#ensureReady();
+    this.#syncMonitorRuntimeState();
+
+    if (this.#executionState === 'stopped') {
+      this.#explicitPauseActive = true;
+      const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
+      return {
+        executionState: debugState.executionState,
+        lastStopReason: debugState.lastStopReason,
+        programCounter: debugState.programCounter,
+        registers: debugState.registers,
+        warnings: [] as WarningItem[],
+      };
+    }
+
+    if (this.#executionState !== 'running') {
+      emulatorNotRunningError('execute pause', {
+        executionState: this.#executionState,
+        lastStopReason: this.#lastStopReason,
+      });
+    }
+
+    this.#explicitPauseActive = true;
+    this.#lastExecutionIntent = 'monitor_entry';
+    this.#writeProcessLogLine('[tx] execute pause');
+    await this.#client.ping();
+    const paused = await this.waitForState('stopped', 5000, 0);
+    if (!paused.reachedTarget) {
+      throw new ViceMcpError('pause_timeout', 'execute pause could not reach a stopped state before timeout.', 'timeout', true, {
+        executionState: paused.executionState,
+        lastStopReason: paused.lastStopReason,
+      });
+    }
+    const debugState = await this.#readDebugState();
+    return {
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
+      warnings: [] as WarningItem[],
+    };
+  }
+
+  async continueExecution(waitUntilRunningStable = false) {
     await this.#ensureReady();
     if (this.#executionState !== 'stopped') {
       debuggerNotPausedError('execute resume', {
@@ -960,16 +1044,22 @@ export class ViceSession {
       });
     }
     const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
+    this.#explicitPauseActive = false;
     this.#lastExecutionIntent = 'unknown';
     this.#writeProcessLogLine('[tx] execute resume');
     await this.#client.continueExecution();
-    this.#syncMonitorRuntimeState();
+    if (waitUntilRunningStable) {
+      await this.waitForState('running', 5000, INPUT_RUNNING_STABLE_MS);
+    } else {
+      this.#syncMonitorRuntimeState();
+    }
+    const runtime = this.#client.runtimeState();
     return {
       executionState: this.#executionState,
       lastStopReason: this.#lastStopReason,
-      programCounter: debugState.programCounter,
+      programCounter: runtime.programCounter ?? debugState.programCounter,
       registers: debugState.registers,
-      warnings: [] as WarningItem[],
+      warnings: waitUntilRunningStable ? ([] as WarningItem[]) : [makeWarning('Resume acknowledged; use wait_for_state for a stable post-resume state.', 'resume_async')],
     };
   }
 
@@ -1008,6 +1098,7 @@ export class ViceSession {
 
   async resetMachine(mode: 'soft' | 'hard') {
     await this.#ensureReady();
+    this.#explicitPauseActive = false;
     this.#lastExecutionIntent = 'reset';
     this.#writeProcessLogLine(`[tx] execute reset mode=${mode}`);
     await this.#client.reset(mode);
@@ -1073,7 +1164,25 @@ export class ViceSession {
   async deleteBreakpoint(breakpointId: number) {
     await this.#ensureReady();
     this.#writeProcessLogLine(`[tx] breakpoint_clear id=${breakpointId}`);
-    await this.#client.deleteBreakpoint(breakpointId);
+    try {
+      await this.#client.deleteBreakpoint(breakpointId);
+    } catch (error) {
+      if (
+        error instanceof ViceMcpError &&
+        error.code === 'emulator_protocol_error' &&
+        error.details?.emulatorErrorCode === 0x01
+      ) {
+        return {
+          cleared: false,
+          breakpointId,
+          executionState: this.#executionState,
+          lastStopReason: this.#lastStopReason,
+          programCounter: this.#lastRegisters?.PC ?? null,
+          registers: this.#lastRegisters,
+        };
+      }
+      throw error;
+    }
     this.#breakpointLabels.delete(breakpointId);
     return {
       cleared: true,
@@ -1120,8 +1229,10 @@ export class ViceSession {
     autoStart?: boolean;
     fileIndex?: number;
   }) {
-    await this.#ensureRunning('program_load');
     const filePath = path.resolve(options.filePath);
+    await this.#assertReadableProgramFile(filePath);
+    await this.#ensureRunning('program_load');
+    this.#explicitPauseActive = false;
 
     const result = await this.autostartProgram(filePath, options.autoStart ?? true, options.fileIndex ?? 0);
     return {
@@ -1299,7 +1410,12 @@ export class ViceSession {
   }
 
   async getDisplayText() {
-    const displayState = await this.getDisplayState();
+    let displayState = await this.getDisplayState();
+    if (displayState.screenRamAddress === 0 && displayState.graphicsMode === 'standard_text') {
+      this.#writeProcessLogLine('[display] screen RAM address still zero in text mode, retrying display state after short settle');
+      await sleep(250);
+      displayState = await this.getDisplayState();
+    }
     if (!isTextGraphicsMode(displayState.graphicsMode)) {
       unsupportedError('get_display_text is only available when the current graphics mode is a text mode.', {
         graphicsMode: displayState.graphicsMode,
@@ -1385,12 +1501,37 @@ export class ViceSession {
     };
   }
 
+  async #assertReadableProgramFile(filePath: string): Promise<void> {
+    let stats;
+    try {
+      await fs.access(filePath);
+      stats = await fs.stat(filePath);
+    } catch (error) {
+      throw new ViceMcpError('program_file_missing', `Program file does not exist or is not readable: ${filePath}`, 'io', false, {
+        filePath,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    if (!stats.isFile()) {
+      throw new ViceMcpError('program_file_invalid', `Program path is not a regular file: ${filePath}`, 'io', false, {
+        filePath,
+      });
+    }
+  }
+
   async writeText(text: string) {
     await this.#ensureRunning('write_text');
     const encoded = decodeWriteTextToPetscii(text);
+    if (encoded.length > MAX_WRITE_TEXT_BYTES) {
+      validationError('write_text exceeds the maximum allowed byte length for one request', {
+        length: encoded.length,
+        max: MAX_WRITE_TEXT_BYTES,
+      });
+    }
     this.#writeProcessLogLine(`[tx] write_text length=${encoded.length} text=${JSON.stringify(text)}`);
     await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
-    await this.#settleKeyboardFeed('write_text');
+    await this.#settleInputState('write_text', 'running');
     return {
       sent: true,
       length: encoded.length,
@@ -1414,7 +1555,7 @@ export class ViceSession {
         const duration = clampTapDuration(durationMs);
         const bytes = Uint8Array.from(resolvedKeys.flatMap((key) => Array.from(key.bytes)));
         await this.#client.sendKeys(Buffer.from(bytes).toString('binary'));
-        await this.#settleKeyboardFeed('keyboard_input');
+        await this.#settleInputState('keyboard_input', 'running');
         await sleep(duration);
         return {
           action,
@@ -1438,11 +1579,11 @@ export class ViceSession {
           const byte = singleByteKeys[index]!;
           if (!this.#heldKeyboardIntervals.has(heldKey)) {
             await this.#client.sendKeys(Buffer.from([byte]).toString('binary'));
-            await this.#settleKeyboardFeed('keyboard_input');
+            await this.#settleInputState('keyboard_input', 'running');
             const interval = setInterval(() => {
               void this.#client
                 .sendKeys(Buffer.from([byte]).toString('binary'))
-                .then(() => this.#settleKeyboardFeed('keyboard_input'))
+                .then(() => this.#settleInputState('keyboard_input', 'running'))
                 .catch(() => undefined);
             }, DEFAULT_KEYBOARD_REPEAT_MS);
             this.#heldKeyboardIntervals.set(heldKey, interval);
@@ -1484,6 +1625,7 @@ export class ViceSession {
 
   async joystickInput(port: JoystickPort, action: InputAction, control: JoystickControl, durationMs?: number) {
     await this.#ensureRunning('joystick_input');
+    const previousExecutionState = this.#executionState;
     const bit = JOYSTICK_CONTROL_BITS[control];
     if (bit == null) {
       validationError('Unsupported joystick control', { control });
@@ -1507,6 +1649,7 @@ export class ViceSession {
         await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
         break;
     }
+    await this.#settleInputState('joystick_input', previousExecutionState);
 
     return {
       port,
@@ -1515,6 +1658,51 @@ export class ViceSession {
       applied: true,
       state: this.#describeJoystickState(port),
     };
+  }
+
+  async waitForState(
+    targetState: Extract<SessionState['executionState'], 'running' | 'stopped'>,
+    timeoutMs = 5000,
+    stableMs = targetState === 'running' ? INPUT_RUNNING_STABLE_MS : 0,
+  ) {
+    await this.#ensureReady();
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let matchingSince: number | null = null;
+
+    while (true) {
+      this.#syncMonitorRuntimeState();
+      if (this.#executionState === targetState) {
+        matchingSince ??= Date.now();
+        if (Date.now() - matchingSince >= stableMs) {
+          const runtime = this.#client.runtimeState();
+          return {
+            executionState: this.#executionState,
+            lastStopReason: this.#lastStopReason,
+            runtimeKnown: runtime.runtimeKnown,
+            programCounter: runtime.programCounter,
+            reachedTarget: true,
+            waitedMs: Date.now() - startedAt,
+          };
+        }
+      } else {
+        matchingSince = null;
+      }
+
+      if (Date.now() >= deadline) {
+        const runtime = this.#client.runtimeState();
+        return {
+          executionState: this.#executionState,
+          lastStopReason: this.#lastStopReason,
+          runtimeKnown: runtime.runtimeKnown,
+          programCounter: runtime.programCounter,
+          reachedTarget: false,
+          waitedMs: Date.now() - startedAt,
+        };
+      }
+
+      await sleep(INPUT_SETTLE_POLL_MS);
+    }
   }
 
   async #ensureReady(): Promise<void> {
@@ -1616,6 +1804,11 @@ export class ViceSession {
     this.#connectedSince = null;
     this.#executionState = 'unknown';
     this.#breakpointLabels.clear();
+    this.#explicitPauseActive = false;
+    this.#pendingCheckpointHit = null;
+    this.#lastCheckpointHit = null;
+    this.#lastRuntimeEventType = 'unknown';
+    this.#lastRuntimeProgramCounter = null;
 
     const env = await buildViceLaunchEnv();
 
@@ -1779,6 +1972,9 @@ export class ViceSession {
       this.#clearHeldInputState();
       const processId = this.#process?.pid ?? null;
       this.#breakpointLabels.clear();
+      this.#explicitPauseActive = false;
+      this.#pendingCheckpointHit = null;
+      this.#lastCheckpointHit = null;
 
       if (this.#client.connected) {
         try {
@@ -2070,6 +2266,7 @@ export class ViceSession {
         this.#writeProcessLogLine(
           `[autostart] observed stopped state after load with autoStart=${autoStart}, sending resume`,
         );
+        this.#explicitPauseActive = false;
         this.#lastExecutionIntent = 'unknown';
         await this.#client.continueExecution();
         lastResumeAt = Date.now();
@@ -2177,7 +2374,10 @@ export class ViceSession {
     }
   }
 
-  async #settleKeyboardFeed(commandName: string): Promise<void> {
+  async #settleInputState(commandName: string, previousExecutionState: SessionState['executionState']): Promise<void> {
+    if (previousExecutionState !== 'running') {
+      return;
+    }
     const deadline = Date.now() + INPUT_SETTLE_TIMEOUT_MS;
     let runningSince: number | null = null;
     let lastResumeAt = 0;
@@ -2196,6 +2396,7 @@ export class ViceSession {
 
       if (this.#executionState === 'stopped' && Date.now() - lastResumeAt >= INPUT_RESUME_COOLDOWN_MS) {
         this.#writeProcessLogLine(`[input] observed stopped state after ${commandName}, sending resume`);
+        this.#explicitPauseActive = false;
         this.#lastExecutionIntent = 'unknown';
         await this.#client.continueExecution();
         lastResumeAt = Date.now();
@@ -2232,11 +2433,12 @@ export class ViceSession {
       return false;
     }
 
-    if (event) {
-      return true;
-    }
-
-    return this.#executionState !== previousExecutionState || this.#lastStopReason !== previousStopReason;
+    return (
+      this.#executionState !== previousExecutionState &&
+      (this.#executionState === 'running' || this.#executionState === 'stopped') &&
+      this.#lastStopReason !== previousStopReason &&
+      event != null
+    );
   }
 
   #resumeWasAcceptedAfterError(
@@ -2268,23 +2470,96 @@ export class ViceSession {
     const eventType = runtime.lastEventType;
 
     this.#executionState = runtime.runtimeKnown && eventType === 'resumed' ? 'running' : runtime.runtimeKnown ? 'stopped' : 'unknown';
-    this.#lastStopReason = this.#stopReasonFromMonitorEvent(eventType);
+    if (eventType !== this.#lastRuntimeEventType || runtime.programCounter !== this.#lastRuntimeProgramCounter) {
+      this.#lastStopReason = this.#stopReasonFromMonitorEvent(eventType);
+      this.#lastRuntimeEventType = eventType;
+      this.#lastRuntimeProgramCounter = runtime.programCounter;
+    }
     this.#writeProcessLogLine(
       `[monitor-state] executionState=${this.#executionState} lastStopReason=${this.#lastStopReason} runtimeKnown=${runtime.runtimeKnown} lastEventType=${eventType}${runtime.programCounter == null ? '' : ` pc=$${runtime.programCounter.toString(16).padStart(4, '0')}`}`,
     );
+    this.#scheduleIdleAutoResume();
   }
 
   #stopReasonFromMonitorEvent(eventType: MonitorRuntimeEventType): StopReason {
     switch (eventType) {
       case 'resumed':
+        this.#pendingCheckpointHit = null;
         return 'none';
       case 'stopped':
+        if (this.#pendingCheckpointHit && Date.now() - this.#pendingCheckpointHit.observedAt <= CHECKPOINT_HIT_SETTLE_MS) {
+          this.#lastCheckpointHit = this.#pendingCheckpointHit;
+          const checkpointReason =
+            this.#pendingCheckpointHit.kind === 'exec'
+              ? 'breakpoint'
+              : this.#pendingCheckpointHit.kind === 'read'
+                ? 'watchpoint_read'
+                : 'watchpoint_write';
+          this.#pendingCheckpointHit = null;
+          return checkpointReason;
+        }
         return this.#lastExecutionIntent;
       case 'jam':
+        this.#pendingCheckpointHit = null;
         return 'error';
       case 'unknown':
+        this.#pendingCheckpointHit = null;
         return 'unknown';
     }
+  }
+
+  #autoResumeAllowed(): boolean {
+    return !this.#shuttingDown && this.#client.connected && !this.#explicitPauseActive;
+  }
+
+  #scheduleIdleAutoResume(): void {
+    if (this.#executionState !== 'stopped' || !this.#autoResumeAllowed()) {
+      this.#clearIdleAutoResume();
+      return;
+    }
+    this.#stoppedAt = Date.now();
+    if (this.#autoResumeTimer) {
+      clearTimeout(this.#autoResumeTimer);
+    }
+    this.#autoResumeTimer = setTimeout(() => {
+      this.#autoResumeTimer = null;
+      void this.#autoResumeDueToIdle();
+    }, STOPPED_IDLE_TIMEOUT_MS);
+  }
+
+  #clearIdleAutoResume(): void {
+    this.#stoppedAt = null;
+    if (this.#autoResumeTimer) {
+      clearTimeout(this.#autoResumeTimer);
+      this.#autoResumeTimer = null;
+    }
+  }
+
+  async #autoResumeDueToIdle(): Promise<void> {
+    if (!this.#autoResumeAllowed() || this.#executionState !== 'stopped') {
+      this.#stoppedAt = null;
+      return;
+    }
+
+    const stoppedMs = this.#stoppedAt ? Date.now() - this.#stoppedAt : STOPPED_IDLE_TIMEOUT_MS;
+    if (stoppedMs < STOPPED_IDLE_TIMEOUT_MS) {
+      this.#scheduleIdleAutoResume();
+      return;
+    }
+
+    this.#writeProcessLogLine(`[auto-resume] emulator stopped for ${STOPPED_IDLE_TIMEOUT_MS}ms, resuming to stay responsive`);
+    try {
+      this.#lastExecutionIntent = 'unknown';
+      await this.#client.continueExecution();
+    } catch (error) {
+      this.#writeProcessLogLine(
+        `[auto-resume] resume attempt failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      this.#stoppedAt = null;
+    }
+
+    this.#syncMonitorRuntimeState();
   }
 
 }

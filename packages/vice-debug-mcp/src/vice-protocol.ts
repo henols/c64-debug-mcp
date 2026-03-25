@@ -34,6 +34,7 @@ export const enum CommandType {
   RegistersAvailable = 0x83,
   DisplayGet = 0x84,
   Info = 0x85,
+  PaletteGet = 0x91,
   JoyportSet = 0xa2,
   Exit = 0xaa,
   Quit = 0xbb,
@@ -62,6 +63,7 @@ const enum ResponseType {
   RegistersAvailable = 0x83,
   DisplayGet = 0x84,
   Info = 0x85,
+  PaletteGet = 0x91,
   JoyportSet = 0xa2,
   Exit = 0xaa,
   Quit = 0xbb,
@@ -97,6 +99,7 @@ export type ParsedResponse =
   | ParsedBreakpointInfoResponse
   | ParsedBreakpointListResponse
   | ParsedDisplayResponse
+  | ParsedPaletteResponse
   | ParsedStoppedEvent
   | ParsedResumedEvent
   | ParsedJamEvent
@@ -159,6 +162,18 @@ export interface ParsedDisplayResponse extends ParsedBaseResponse {
   imageBytes: Uint8Array;
 }
 
+export interface ParsedPaletteItem {
+  index: number;
+  red: number;
+  green: number;
+  blue: number;
+}
+
+export interface ParsedPaletteResponse extends ParsedBaseResponse {
+  type: 'palette';
+  items: ParsedPaletteItem[];
+}
+
 export interface ParsedStoppedEvent extends ParsedBaseResponse {
   type: 'stopped';
   programCounter: number;
@@ -177,6 +192,15 @@ export interface ParsedJamEvent extends ParsedBaseResponse {
 export interface ParsedUndumpResponse extends ParsedBaseResponse {
   type: 'undump';
   programCounter: number;
+}
+
+export type MonitorRuntimeEventType = 'unknown' | 'resumed' | 'stopped' | 'jam';
+
+export interface MonitorRuntimeState {
+  connected: boolean;
+  runtimeKnown: boolean;
+  lastEventType: MonitorRuntimeEventType;
+  programCounter: number | null;
 }
 
 function parseLittleEndianVariableWidth(bytes: Uint8Array): number {
@@ -294,8 +318,8 @@ function parseResponse(responseType: number, errorCode: number, requestId: numbe
       };
     }
     case ResponseType.DisplayGet: {
-      const infoLength = body.readUInt32LE(0);
-      const imageLength = body.readUInt32LE(17);
+      const infoLength = errorCode === ErrorCode.OK ? body.readUInt32LE(0) : 0;
+      const imageLength = errorCode === ErrorCode.OK ? body.readUInt32LE(17) : 0;
       return {
         type: 'display',
         requestId,
@@ -309,6 +333,22 @@ function parseResponse(responseType: number, errorCode: number, requestId: numbe
         bitsPerPixel: body[16] ?? 0,
         imageBytes: body.subarray(infoLength + 4, infoLength + 4 + imageLength),
       };
+    }
+    case ResponseType.PaletteGet: {
+      const count = errorCode === ErrorCode.OK ? body.readUInt16LE(0) : 0;
+      let offset = 2;
+      const items: ParsedPaletteItem[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const itemSize = body[offset] ?? 0;
+        items.push({
+          index,
+          red: body[offset + 1] ?? 0,
+          green: body[offset + 2] ?? 0,
+          blue: body[offset + 3] ?? 0,
+        });
+        offset += itemSize + 1;
+      }
+      return { type: 'palette', requestId, errorCode, items };
     }
     case ResponseType.Stopped:
       return { type: 'stopped', requestId, errorCode, programCounter: body.readUInt16LE(0) };
@@ -331,9 +371,19 @@ export class ViceMonitorClient extends EventEmitter {
   #chain = Promise.resolve();
   #host: string | null = null;
   #port: number | null = null;
+  #runtimeState: MonitorRuntimeState = {
+    connected: false,
+    runtimeKnown: false,
+    lastEventType: 'unknown',
+    programCounter: null,
+  };
 
   get connected(): boolean {
     return this.#socket != null && !this.#socket.destroyed;
+  }
+
+  runtimeState(): MonitorRuntimeState {
+    return { ...this.#runtimeState };
   }
 
   async connect(host: string, port: number): Promise<void> {
@@ -350,6 +400,12 @@ export class ViceMonitorClient extends EventEmitter {
     await new Promise<void>((resolve, reject) => {
       const socket = net.createConnection({ host, port }, () => {
         this.#socket = socket;
+        this.#runtimeState = {
+          connected: true,
+          runtimeKnown: false,
+          lastEventType: 'unknown',
+          programCounter: null,
+        };
         resolve();
       });
 
@@ -378,6 +434,12 @@ export class ViceMonitorClient extends EventEmitter {
 
     const socket = this.#socket;
     this.#socket = null;
+    this.#runtimeState = {
+      connected: false,
+      runtimeKnown: false,
+      lastEventType: 'unknown',
+      programCounter: null,
+    };
     await new Promise<void>((resolve) => {
       socket.once('close', () => resolve());
       socket.destroy();
@@ -390,6 +452,14 @@ export class ViceMonitorClient extends EventEmitter {
 
   async getInfo(): Promise<ParsedInfoResponse> {
     return this.send(CommandType.Info, Buffer.alloc(0));
+  }
+
+  async captureDisplay(useVic = true): Promise<ParsedDisplayResponse> {
+    return this.send(CommandType.DisplayGet, Buffer.from([useVic ? 1 : 0, 0x00]));
+  }
+
+  async getPalette(useVic = true): Promise<ParsedPaletteResponse> {
+    return this.send(CommandType.PaletteGet, Buffer.from([useVic ? 1 : 0]));
   }
 
   async getRegistersAvailable(): Promise<ParsedRegistersAvailableResponse> {
@@ -522,17 +592,13 @@ export class ViceMonitorClient extends EventEmitter {
     return this.send(CommandType.ConditionSet, body);
   }
 
-  async autostartProgram(filename: string, runAfterLoading: boolean, fileIndex = 0): Promise<ParsedEmptyResponse> {
+  async autostartProgram(filename: string, autoStart: boolean, fileIndex = 0): Promise<ParsedEmptyResponse> {
     const body = Buffer.alloc(4 + Buffer.byteLength(filename));
-    body[0] = runAfterLoading ? 1 : 0;
+    body[0] = autoStart ? 1 : 0;
     body.writeUInt16LE(fileIndex, 1);
     body[3] = Buffer.byteLength(filename);
     body.write(filename, 4, 'ascii');
     return this.send(CommandType.AutoStart, body);
-  }
-
-  async captureDisplay(useVic = true): Promise<ParsedDisplayResponse> {
-    return this.send(CommandType.DisplayGet, Buffer.from([useVic ? 1 : 0, 0x00]));
   }
 
   async quit(): Promise<ParsedEmptyResponse> {
@@ -603,6 +669,7 @@ export class ViceMonitorClient extends EventEmitter {
     for (const response of responses) {
       this.emit('response', response);
       if (response.requestId === VICE_BROADCAST_REQUEST_ID) {
+        this.#applyRuntimeResponse(response);
         this.emit('event', response);
         continue;
       }
@@ -648,6 +715,29 @@ export class ViceMonitorClient extends EventEmitter {
     }
     this.#pending.clear();
     this.#socket = null;
+    this.#runtimeState = {
+      connected: false,
+      runtimeKnown: false,
+      lastEventType: 'unknown',
+      programCounter: null,
+    };
     this.emit('close');
+  }
+
+  #applyRuntimeResponse(response: ParsedResponse): void {
+    switch (response.type) {
+      case 'resumed':
+      case 'stopped':
+      case 'jam':
+        this.#runtimeState = {
+          connected: this.connected,
+          runtimeKnown: true,
+          lastEventType: response.type,
+          programCounter: response.programCounter,
+        };
+        break;
+      default:
+        break;
+    }
   }
 }

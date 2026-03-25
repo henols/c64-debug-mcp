@@ -53,6 +53,35 @@ export const monitorStateSchema = z.object({
   programCounter: address16Schema.nullable().describe('Program counter from the latest monitor event, or null if unknown'),
 });
 
+export const sessionStateResultSchema = z.object({
+  transportState: z.enum([
+    'not_started',
+    'starting',
+    'waiting_for_monitor',
+    'connecting',
+    'connected',
+    'reconnecting',
+    'disconnected',
+    'stopped',
+    'faulted',
+  ]),
+  processState: z.enum(['not_applicable', 'launching', 'running', 'exited', 'crashed']),
+  executionState: executionStateSchema.describe('Current execution state of the emulator session'),
+  lastStopReason: stopReasonSchema.describe('Reason the emulator most recently stopped in the monitor'),
+  idleAutoResumeArmed: z.boolean().describe('Whether the idle auto-resume timer is currently armed'),
+  explicitPauseActive: z.boolean().describe('Whether execution was explicitly paused by the caller'),
+  lastCheckpointId: z.number().int().nullable().describe('Most recent hit checkpoint/watchpoint id when known'),
+  lastCheckpointKind: breakpointKindSchema.nullable().describe('Most recent hit checkpoint/watchpoint kind when known'),
+  recoveryInProgress: z.boolean(),
+  launchId: z.number().int().nonnegative(),
+  restartCount: z.number().int().nonnegative(),
+  freshEmulatorPending: z.boolean(),
+  connectedSince: z.string().nullable(),
+  lastResponseAt: z.string().nullable(),
+  processId: z.number().int().nullable(),
+  warnings: z.array(warningSchema),
+});
+
 export const breakpointSchema = z.object({
   id: z.number().int().describe('Breakpoint identifier'),
   address: address16Schema.describe('Start address of the breakpoint range'),
@@ -156,6 +185,15 @@ export const joystickInputResultSchema = z.object({
   control: joystickControlSchema.describe('Joystick control that was applied'),
   applied: z.boolean().describe('Whether the request was accepted and applied'),
   state: joystickStateSchema,
+});
+
+export const waitForStateResultSchema = z.object({
+  executionState: executionStateSchema.describe('Current execution state after waiting'),
+  lastStopReason: stopReasonSchema.describe('Reason the emulator most recently stopped in the monitor'),
+  runtimeKnown: z.boolean().describe('Whether the monitor has reported a runtime event in this session'),
+  programCounter: address16Schema.nullable().describe('Program counter from the latest monitor event, or null if unknown'),
+  reachedTarget: z.boolean().describe('Whether the requested target state was reached before timeout'),
+  waitedMs: z.number().int().nonnegative().describe('Milliseconds spent waiting'),
 });
 
 export function toolOutputSchema<T extends z.ZodTypeAny>(dataSchema: T) {
