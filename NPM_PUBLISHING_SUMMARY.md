@@ -163,24 +163,33 @@ npm view @c64mcp/c64-debug-mcp
 
 ## Installation After Publishing
 
-Users will be able to install with:
+### Recommended: No Installation Required
+
+Users can run the latest version automatically using `npx`:
+
+```json
+{
+  "mcpServers": {
+    "c64-debug": {
+      "command": "npx",
+      "args": ["-y", "@c64mcp/c64-debug-mcp"]
+    }
+  }
+}
+```
+
+**Benefits:**
+- No installation step
+- Always uses latest version
+- Cross-platform compatible
+
+### Alternative: Global Installation
 
 ```bash
 # Global installation
 npm install -g @c64mcp/c64-debug-mcp
 
-# Local installation
-npm install @c64mcp/c64-debug-mcp
-
-# Using npx (no install)
-npx @c64mcp/c64-debug-mcp
-```
-
-## Claude Desktop Configuration
-
-Users add to their config:
-
-```json
+# Claude Desktop config
 {
   "mcpServers": {
     "c64-debug": {
@@ -188,6 +197,16 @@ Users add to their config:
     }
   }
 }
+```
+
+### For Direct Usage
+
+```bash
+# Run without installing
+npx @c64mcp/c64-debug-mcp
+
+# Or install locally
+npm install @c64mcp/c64-debug-mcp
 ```
 
 ## Next Steps

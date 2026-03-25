@@ -22,34 +22,44 @@ Think of it as giving Claude a direct connection to your C64's brain through VIC
 ## Quick Start
 
 ```bash
-# Install globally
-npm install -g @c64mcp/c64-debug-mcp
-
-# Start VICE with remote monitor
+# 1. Start VICE with remote monitor
 x64sc -remotemonitor -remotemonitoraddress 127.0.0.1:6502
 
-# Configure Claude Desktop (see below)
+# 2. Add to Claude Desktop config (no installation needed!)
+#    See config below
 
-# Ask Claude: "What's at memory address $D000?"
+# 3. Ask Claude: "What's at memory address $D000?"
 ```
 
 ## Installation & Configuration
 
 See [packages/c64-debug-mcp/README.md](packages/c64-debug-mcp/README.md) for detailed installation and usage instructions.
 
-### Claude Desktop Setup
+### Claude Desktop Setup (Recommended)
 
-Add to your Claude Desktop config:
+Add to your Claude Desktop config - uses `npx` to automatically run the latest version:
 
 ```json
 {
   "mcpServers": {
     "c64-debug": {
-      "command": "c64-debug-mcp"
+      "command": "npx",
+      "args": ["-y", "@c64mcp/c64-debug-mcp"]
     }
   }
 }
 ```
+
+**Benefits:**
+- ✅ No installation required
+- ✅ Always uses latest version
+- ✅ Works immediately after restart
+
+**Alternative:** If you prefer global installation:
+```bash
+npm install -g @c64mcp/c64-debug-mcp
+```
+Then use: `"command": "c64-debug-mcp"`
 
 ## Features
 

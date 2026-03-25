@@ -24,13 +24,19 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 ## Installation
 
-### Global Installation (Recommended)
+### Option 1: No Installation (Recommended)
+
+Use `npx` to automatically run the latest version without installing:
+
+**No setup required!** Just configure Claude Desktop (see below).
+
+### Option 2: Global Installation
 
 ```bash
 npm install -g @c64mcp/c64-debug-mcp
 ```
 
-### Local Installation
+### Option 3: Local Installation
 
 ```bash
 npm install @c64mcp/c64-debug-mcp
@@ -45,6 +51,21 @@ Add to your Claude Desktop configuration file:
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+#### Recommended: Using npx (no installation, always latest)
+
+```json
+{
+  "mcpServers": {
+    "c64-debug": {
+      "command": "npx",
+      "args": ["-y", "@c64mcp/c64-debug-mcp"]
+    }
+  }
+}
+```
+
+#### Alternative: Using global installation
 
 ```json
 {
@@ -84,9 +105,21 @@ C64_DEBUG_HTTP_HEALTH_PATH=/healthz # Default: /healthz
    x64sc -remotemonitor -remotemonitoraddress 127.0.0.1:6502
    ```
 
-2. **Configure Claude Desktop** with the MCP server (see above)
+2. **Configure Claude Desktop** (add to config file):
+   ```json
+   {
+     "mcpServers": {
+       "c64-debug": {
+         "command": "npx",
+         "args": ["-y", "@c64mcp/c64-debug-mcp"]
+       }
+     }
+   }
+   ```
 
-3. **Ask Claude to interact with C64**:
+3. **Restart Claude Desktop**
+
+4. **Ask Claude to interact with C64**:
    - "What's in memory at $D000?"
    - "Set a breakpoint at $1000"
    - "Load and run my program.prg"

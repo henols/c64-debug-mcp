@@ -110,12 +110,35 @@ npm install @c64mcp/c64-debug-mcp@beta
 After publishing, verify:
 
 1. **Package page**: https://www.npmjs.com/package/@c64mcp/c64-debug-mcp
-2. **Test installation**:
+2. **Test with npx (recommended)**:
+   ```bash
+   npx -y @c64mcp/c64-debug-mcp --help
+   ```
+3. **Test with Claude Desktop**: Update config and restart
+   ```json
+   {
+     "mcpServers": {
+       "c64-debug": {
+         "command": "npx",
+         "args": ["-y", "@c64mcp/c64-debug-mcp"]
+       }
+     }
+   }
+   ```
+4. **Test global installation** (optional):
    ```bash
    npm install -g @c64mcp/c64-debug-mcp
    c64-debug-mcp --help
    ```
-3. **Test with Claude Desktop**: Update config and restart
+
+### Why npx is Recommended
+
+Using `npx -y @c64mcp/c64-debug-mcp` in Claude Desktop config is recommended because:
+- ✅ No installation step required
+- ✅ Always runs latest published version
+- ✅ Users get updates automatically
+- ✅ Simpler setup process
+- ✅ Cross-platform compatible
 
 ## Troubleshooting
 
