@@ -15,6 +15,7 @@ import {
   type C64RegisterName,
   type BreakpointKind,
   type C64Config,
+  type ExecutionState,
   type InputAction,
   type JoystickControl,
   type JoystickPort,
@@ -749,6 +750,7 @@ export class ViceSession {
   #explicitPauseActive = false;
   #pendingCheckpointHit: CheckpointHitState | null = null;
   #lastCheckpointHit: CheckpointHitState | null = null;
+  #checkpointQueryPending = false;
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
@@ -1047,19 +1049,40 @@ export class ViceSession {
     this.#explicitPauseActive = false;
     this.#lastExecutionIntent = 'unknown';
     this.#writeProcessLogLine('[tx] execute resume');
+
+    // Wait for execution event to confirm resume
+    const executionEvent = this.#waitForExecutionEvent(1000);
     await this.#client.continueExecution();
+    const event = await executionEvent;
+
+    if (!event || event.type !== 'resumed') {
+      this.#writeProcessLogLine(`[execute-resume] no resumed event within 1000ms (got ${event?.type ?? 'nothing'})`);
+    }
+
     if (waitUntilRunningStable) {
       await this.waitForState('running', 5000, INPUT_RUNNING_STABLE_MS);
     } else {
       this.#syncMonitorRuntimeState();
     }
+
     const runtime = this.#client.runtimeState();
+    const warnings: WarningItem[] = [];
+
+    // After syncMonitorRuntimeState or waitForState, execution state may have changed
+    // TypeScript doesn't track mutations through method calls, so we read the current value
+    const currentExecutionState = this.#executionState as ExecutionState;
+    if (!waitUntilRunningStable && currentExecutionState !== 'running') {
+      warnings.push(
+        makeWarning('Resume acknowledged but state transition not yet confirmed; use wait_for_state for authoritative state.', 'resume_async'),
+      );
+    }
+
     return {
-      executionState: this.#executionState,
+      executionState: currentExecutionState,
       lastStopReason: this.#lastStopReason,
       programCounter: runtime.programCounter ?? debugState.programCounter,
       registers: debugState.registers,
-      warnings: waitUntilRunningStable ? ([] as WarningItem[]) : [makeWarning('Resume acknowledged; use wait_for_state for a stable post-resume state.', 'resume_async')],
+      warnings,
     };
   }
 
@@ -2498,6 +2521,10 @@ export class ViceSession {
           this.#pendingCheckpointHit = null;
           return checkpointReason;
         }
+        // Schedule fallback query when stop reason is ambiguous
+        if (this.#lastExecutionIntent === 'unknown' && !this.#checkpointQueryPending) {
+          void this.#scheduleCheckpointHitQuery();
+        }
         return this.#lastExecutionIntent;
       case 'jam':
         this.#pendingCheckpointHit = null;
@@ -2505,6 +2532,43 @@ export class ViceSession {
       case 'unknown':
         this.#pendingCheckpointHit = null;
         return 'unknown';
+    }
+  }
+
+  async #scheduleCheckpointHitQuery(): Promise<void> {
+    if (this.#checkpointQueryPending) {
+      return;
+    }
+    this.#checkpointQueryPending = true;
+
+    try {
+      // Wait a short window for checkpoint_info to arrive naturally
+      await sleep(200);
+
+      // If we already got checkpoint correlation, skip query
+      if (this.#lastStopReason !== 'unknown' && this.#lastStopReason !== this.#lastExecutionIntent) {
+        return;
+      }
+
+      this.#writeProcessLogLine('[checkpoint-query] probing for hit checkpoint after ambiguous stop');
+      const response = await this.#client.listBreakpoints();
+      const hit = response.checkpoints.find((cp) => cp.currentlyHit);
+
+      if (hit) {
+        this.#lastCheckpointHit = {
+          id: hit.id,
+          kind: hit.kind,
+          observedAt: Date.now(),
+        };
+        const reason = hit.kind === 'exec' ? 'breakpoint' : hit.kind === 'read' ? 'watchpoint_read' : 'watchpoint_write';
+
+        this.#lastStopReason = reason;
+        this.#writeProcessLogLine(`[checkpoint-query] retroactively identified stop reason: ${reason} (id=${hit.id})`);
+      }
+    } catch (error) {
+      this.#writeProcessLogLine(`[checkpoint-query] failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.#checkpointQueryPending = false;
     }
   }
 
