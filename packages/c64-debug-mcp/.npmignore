@@ -1,0 +1,36 @@
+# Source files (we ship compiled output only)
+src/
+tsconfig.json
+
+# Tests
+tests/
+*.test.ts
+*.spec.ts
+
+# Development files
+.c64-debug-mcp-artifacts/
+*.log
+
+# Build artifacts we don't need
+*.tsbuildinfo
+
+# Documentation (already in package)
+PUBLISHING.md
+CONTRIBUTING.md
+
+# CI/CD
+.github/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.bak
+*.tmp

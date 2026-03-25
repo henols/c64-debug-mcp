@@ -1,8 +1,28 @@
 {
   "name": "@c64mcp/c64-debug-mcp",
   "version": "0.1.0",
-  "private": true,
+  "description": "Model Context Protocol server for C64 debugging via VICE emulator",
   "type": "module",
+  "keywords": [
+    "mcp",
+    "c64",
+    "commodore",
+    "vice",
+    "debugger",
+    "retro",
+    "6502",
+    "model-context-protocol",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/henols/c64-debug-mcp.git",
+    "directory": "packages/c64-debug-mcp"
+  },
+  "bugs": "https://github.com/henols/c64-debug-mcp/issues",
+  "homepage": "https://github.com/henols/c64-debug-mcp#readme",
+  "author": "Henrik Olsson",
+  "license": "MIT",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -10,9 +30,15 @@
     "c64-debug-mcp": "dist/stdio.js",
     "c64-debug-mcp-http": "dist/http.js"
   },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup src/stdio.ts src/http.ts --format esm,cjs --dts --no-splitting --clean",
     "check": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run check",
     "dev:http": "C64_DEBUG_CONSOLE_LOGS=1 /home/henrik/.nvm/versions/node/v22.13.0/bin/node ../../node_modules/tsx/dist/cli.mjs watch src/http.ts",
     "smoke:http": "node tests/smoke-http.mjs",
     "smoke:http:dev": "C64_DEBUG_HTTP_URL=http://127.0.0.1:39080/mcp node tests/smoke-http.mjs",
