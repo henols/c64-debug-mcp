@@ -6,6 +6,9 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @vicemcp/vice-debug-mcp",
-    "check": "npm run check --workspace @vicemcp/vice-debug-mcp"
+    "check": "npm run check --workspace @vicemcp/vice-debug-mcp",
+    "dev:http": "npm run dev:http --workspace @vicemcp/vice-debug-mcp",
+    "smoke:http": "npm run smoke:http --workspace @vicemcp/vice-debug-mcp",
+    "smoke:http:dev": "npm run smoke:http:dev --workspace @vicemcp/vice-debug-mcp"
   }
 }

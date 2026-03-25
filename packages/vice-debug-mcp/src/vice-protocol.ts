@@ -700,7 +700,11 @@ export class ViceMonitorClient extends EventEmitter {
       }
 
       if (pending.type === CommandType.CheckpointList && response.type === 'checkpoint_list') {
-        response.checkpoints = (pending.linkedCheckpointInfo ?? []).map((entry) => entry.checkpoint);
+        // Defensive check: ensure linkedCheckpointInfo is always an array
+        if (!pending.linkedCheckpointInfo) {
+          pending.linkedCheckpointInfo = [];
+        }
+        response.checkpoints = pending.linkedCheckpointInfo.map((entry) => entry.checkpoint);
       }
 
       pending.resolve(response);

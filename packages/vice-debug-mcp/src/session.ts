@@ -584,15 +584,19 @@ const INPUT_RUNNING_STABLE_MS = 750;
 const INPUT_RESUME_COOLDOWN_MS = 250;
 const CHECKPOINT_HIT_SETTLE_MS = 1000;
 const STOPPED_IDLE_TIMEOUT_MS = 20_000;
+const MIN_TAP_DURATION_MS = 10;
+const MAX_TAP_DURATION_MS = 10000;
+const RESET_GRACE_PERIOD_MS = 150;
 
 function clampTapDuration(durationMs: number | undefined): number {
   if (durationMs == null) {
     return DEFAULT_INPUT_TAP_MS;
   }
-  if (!Number.isInteger(durationMs) || durationMs <= 0) {
-    validationError('durationMs must be a positive integer', { durationMs });
+  if (!Number.isInteger(durationMs)) {
+    validationError('durationMs must be an integer', { durationMs });
   }
-  return durationMs;
+  // Clamp to reasonable range instead of throwing
+  return Math.max(MIN_TAP_DURATION_MS, Math.min(MAX_TAP_DURATION_MS, durationMs));
 }
 
 function joystickPortToProtocol(port: JoystickPort): number {
@@ -751,6 +755,8 @@ export class ViceSession {
   #pendingCheckpointHit: CheckpointHitState | null = null;
   #lastCheckpointHit: CheckpointHitState | null = null;
   #checkpointQueryPending = false;
+  #executionOperationLock: Promise<void> | null = null;
+  #displayOperationLock: Promise<void> | null = null;
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
@@ -994,12 +1000,41 @@ export class ViceSession {
   }
 
   async pauseExecution() {
-    await this.#ensureReady();
-    this.#syncMonitorRuntimeState();
+    return this.#withExecutionLock(async () => {
+      await this.#ensureReady();
+      this.#syncMonitorRuntimeState();
 
-    if (this.#executionState === 'stopped') {
+      if (this.#executionState === 'stopped') {
+        this.#explicitPauseActive = true;
+        const debugState = await this.#readDebugState();
+        return {
+          executionState: debugState.executionState,
+          lastStopReason: debugState.lastStopReason,
+          programCounter: debugState.programCounter,
+          registers: debugState.registers,
+          warnings: [] as WarningItem[],
+        };
+      }
+
+      if (this.#executionState !== 'running') {
+        emulatorNotRunningError('execute pause', {
+          executionState: this.#executionState,
+          lastStopReason: this.#lastStopReason,
+        });
+      }
+
       this.#explicitPauseActive = true;
-      const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
+      this.#lastExecutionIntent = 'monitor_entry';
+      this.#writeProcessLogLine('[tx] execute pause');
+      await this.#client.ping();
+      const paused = await this.waitForState('stopped', 5000, 0);
+      if (!paused.reachedTarget) {
+        throw new ViceMcpError('pause_timeout', 'execute pause could not reach a stopped state before timeout.', 'timeout', true, {
+          executionState: paused.executionState,
+          lastStopReason: paused.lastStopReason,
+        });
+      }
+      const debugState = await this.#readDebugState();
       return {
         executionState: debugState.executionState,
         lastStopReason: debugState.lastStopReason,
@@ -1007,83 +1042,60 @@ export class ViceSession {
         registers: debugState.registers,
         warnings: [] as WarningItem[],
       };
-    }
-
-    if (this.#executionState !== 'running') {
-      emulatorNotRunningError('execute pause', {
-        executionState: this.#executionState,
-        lastStopReason: this.#lastStopReason,
-      });
-    }
-
-    this.#explicitPauseActive = true;
-    this.#lastExecutionIntent = 'monitor_entry';
-    this.#writeProcessLogLine('[tx] execute pause');
-    await this.#client.ping();
-    const paused = await this.waitForState('stopped', 5000, 0);
-    if (!paused.reachedTarget) {
-      throw new ViceMcpError('pause_timeout', 'execute pause could not reach a stopped state before timeout.', 'timeout', true, {
-        executionState: paused.executionState,
-        lastStopReason: paused.lastStopReason,
-      });
-    }
-    const debugState = await this.#readDebugState();
-    return {
-      executionState: debugState.executionState,
-      lastStopReason: debugState.lastStopReason,
-      programCounter: debugState.programCounter,
-      registers: debugState.registers,
-      warnings: [] as WarningItem[],
-    };
+    });
   }
 
   async continueExecution(waitUntilRunningStable = false) {
-    await this.#ensureReady();
-    if (this.#executionState !== 'stopped') {
-      debuggerNotPausedError('execute resume', {
-        executionState: this.#executionState,
+    return this.#withExecutionLock(async () => {
+      await this.#ensureReady();
+      if (this.#executionState !== 'stopped') {
+        debuggerNotPausedError('execute resume', {
+          executionState: this.#executionState,
+          lastStopReason: this.#lastStopReason,
+        });
+      }
+      const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
+      this.#lastExecutionIntent = 'unknown';
+      this.#writeProcessLogLine('[tx] execute resume');
+
+      // Wait for execution event to confirm resume
+      const executionEvent = this.#waitForExecutionEvent(1000);
+      await this.#client.continueExecution();
+      const event = await executionEvent;
+
+      if (!event || event.type !== 'resumed') {
+        this.#writeProcessLogLine(`[execute-resume] no resumed event within 1000ms (got ${event?.type ?? 'nothing'})`);
+      }
+
+      if (waitUntilRunningStable) {
+        await this.waitForState('running', 5000, INPUT_RUNNING_STABLE_MS);
+      } else {
+        this.#syncMonitorRuntimeState();
+      }
+
+      // Clear explicit pause flag AFTER successful resume and state sync
+      this.#explicitPauseActive = false;
+
+      const runtime = this.#client.runtimeState();
+      const warnings: WarningItem[] = [];
+
+      // After syncMonitorRuntimeState or waitForState, execution state may have changed
+      // TypeScript doesn't track mutations through method calls, so we read the current value
+      const currentExecutionState = this.#executionState as ExecutionState;
+      if (!waitUntilRunningStable && currentExecutionState !== 'running') {
+        warnings.push(
+          makeWarning('Resume acknowledged but state transition not yet confirmed; use wait_for_state for authoritative state.', 'resume_async'),
+        );
+      }
+
+      return {
+        executionState: currentExecutionState,
         lastStopReason: this.#lastStopReason,
-      });
-    }
-    const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
-    this.#explicitPauseActive = false;
-    this.#lastExecutionIntent = 'unknown';
-    this.#writeProcessLogLine('[tx] execute resume');
-
-    // Wait for execution event to confirm resume
-    const executionEvent = this.#waitForExecutionEvent(1000);
-    await this.#client.continueExecution();
-    const event = await executionEvent;
-
-    if (!event || event.type !== 'resumed') {
-      this.#writeProcessLogLine(`[execute-resume] no resumed event within 1000ms (got ${event?.type ?? 'nothing'})`);
-    }
-
-    if (waitUntilRunningStable) {
-      await this.waitForState('running', 5000, INPUT_RUNNING_STABLE_MS);
-    } else {
-      this.#syncMonitorRuntimeState();
-    }
-
-    const runtime = this.#client.runtimeState();
-    const warnings: WarningItem[] = [];
-
-    // After syncMonitorRuntimeState or waitForState, execution state may have changed
-    // TypeScript doesn't track mutations through method calls, so we read the current value
-    const currentExecutionState = this.#executionState as ExecutionState;
-    if (!waitUntilRunningStable && currentExecutionState !== 'running') {
-      warnings.push(
-        makeWarning('Resume acknowledged but state transition not yet confirmed; use wait_for_state for authoritative state.', 'resume_async'),
-      );
-    }
-
-    return {
-      executionState: currentExecutionState,
-      lastStopReason: this.#lastStopReason,
-      programCounter: runtime.programCounter ?? debugState.programCounter,
-      registers: debugState.registers,
-      warnings,
-    };
+        programCounter: runtime.programCounter ?? debugState.programCounter,
+        registers: debugState.registers,
+        warnings,
+      };
+    });
   }
 
   async stepInstruction(count = 1, stepOver = false) {
@@ -1120,20 +1132,34 @@ export class ViceSession {
   }
 
   async resetMachine(mode: 'soft' | 'hard') {
-    await this.#ensureReady();
-    this.#explicitPauseActive = false;
-    this.#lastExecutionIntent = 'reset';
-    this.#writeProcessLogLine(`[tx] execute reset mode=${mode}`);
-    await this.#client.reset(mode);
-    this.#syncMonitorRuntimeState();
-    const debugState = await this.#readDebugState();
-    return {
-      executionState: debugState.executionState,
-      lastStopReason: debugState.lastStopReason,
-      programCounter: debugState.programCounter,
-      registers: debugState.registers,
-      warnings: [] as WarningItem[],
-    };
+    return this.#withExecutionLock(async () => {
+      await this.#ensureReady();
+      // Save pause intent before reset
+      const wasPaused = this.#explicitPauseActive;
+      this.#lastExecutionIntent = 'reset';
+      this.#writeProcessLogLine(`[tx] execute reset mode=${mode}`);
+      await this.#client.reset(mode);
+
+      // Grace period: let emulator settle before continuing
+      await sleep(RESET_GRACE_PERIOD_MS);
+
+      // Restore pause intent
+      this.#explicitPauseActive = wasPaused;
+
+      // Double sync to ensure state is truly stable
+      this.#syncMonitorRuntimeState();
+      await sleep(50);
+      this.#syncMonitorRuntimeState();
+
+      const debugState = await this.#readDebugState();
+      return {
+        executionState: debugState.executionState,
+        lastStopReason: debugState.lastStopReason,
+        programCounter: debugState.programCounter,
+        registers: debugState.registers,
+        warnings: [] as WarningItem[],
+      };
+    });
   }
 
   async listBreakpoints(includeDisabled = true) {
@@ -1267,103 +1293,105 @@ export class ViceSession {
   }
 
   async captureDisplay(useVic = true) {
-    await this.#ensureReady();
-    this.#syncMonitorRuntimeState();
-    const previousExecutionState = this.#executionState;
-    this.#writeProcessLogLine(`[tx] capture_display useVic=${useVic}`);
+    return this.#withDisplayLock(async () => {
+      await this.#ensureReady();
+      this.#syncMonitorRuntimeState();
+      const previousExecutionState = this.#executionState;
+      this.#writeProcessLogLine(`[tx] capture_display useVic=${useVic}`);
 
-    const display = await this.#client.captureDisplay(useVic);
-    const palette = await this.#client.getPalette(useVic);
+      const display = await this.#client.captureDisplay(useVic);
+      const palette = await this.#client.getPalette(useVic);
 
-    if (display.bitsPerPixel !== 8) {
-      throw new ViceMcpError(
-        'display_bpp_unsupported',
-        `capture_display only supports 8-bit indexed display payloads, got ${display.bitsPerPixel}.`,
-        'unsupported',
-        false,
-        { bitsPerPixel: display.bitsPerPixel },
-      );
-    }
-
-    const expectedLength = display.debugWidth * display.debugHeight;
-    if (display.imageBytes.length !== expectedLength) {
-      throw new ViceMcpError(
-        'display_payload_invalid',
-        'capture_display received a display payload whose length does not match the reported debug dimensions.',
-        'protocol',
-        false,
-        {
-          debugWidth: display.debugWidth,
-          debugHeight: display.debugHeight,
-          expectedLength,
-          actualLength: display.imageBytes.length,
-        },
-      );
-    }
-
-    if (palette.items.length === 0) {
-      throw new ViceMcpError('display_palette_missing', 'capture_display received an empty display palette.', 'protocol', false);
-    }
-
-    if (
-      display.debugOffsetX + display.innerWidth > display.debugWidth ||
-      display.debugOffsetY + display.innerHeight > display.debugHeight
-    ) {
-      throw new ViceMcpError(
-        'display_crop_invalid',
-        'capture_display received crop geometry outside the display buffer bounds.',
-        'protocol',
-        false,
-        {
-          debugWidth: display.debugWidth,
-          debugHeight: display.debugHeight,
-          debugOffsetX: display.debugOffsetX,
-          debugOffsetY: display.debugOffsetY,
-          innerWidth: display.innerWidth,
-          innerHeight: display.innerHeight,
-        },
-      );
-    }
-
-    const rgbPixels = new Uint8Array(display.innerWidth * display.innerHeight * 3);
-    for (let y = 0; y < display.innerHeight; y += 1) {
-      for (let x = 0; x < display.innerWidth; x += 1) {
-        const sourceX = display.debugOffsetX + x;
-        const sourceY = display.debugOffsetY + y;
-        const sourceIndex = sourceY * display.debugWidth + sourceX;
-        const paletteIndex = display.imageBytes[sourceIndex]!;
-        const color = palette.items[paletteIndex];
-        if (!color) {
-          throw new ViceMcpError(
-            'display_palette_index_invalid',
-            'capture_display encountered a pixel index that is outside the current palette.',
-            'protocol',
-            false,
-            { paletteIndex, paletteSize: palette.items.length },
-          );
-        }
-        const targetIndex = (y * display.innerWidth + x) * 3;
-        rgbPixels[targetIndex] = color.red;
-        rgbPixels[targetIndex + 1] = color.green;
-        rgbPixels[targetIndex + 2] = color.blue;
+      if (display.bitsPerPixel !== 8) {
+        throw new ViceMcpError(
+          'display_bpp_unsupported',
+          `capture_display only supports 8-bit indexed display payloads, got ${display.bitsPerPixel}.`,
+          'unsupported',
+          false,
+          { bitsPerPixel: display.bitsPerPixel },
+        );
       }
-    }
 
-    await fs.mkdir(DISPLAY_CAPTURE_DIR, { recursive: true });
-    const imagePath = path.join(DISPLAY_CAPTURE_DIR, `capture-${Date.now()}-${process.pid}.png`);
-    await fs.writeFile(imagePath, encodePngRgb(display.innerWidth, display.innerHeight, rgbPixels));
-    await this.#settleDisplayToolState('capture_display', previousExecutionState);
+      const expectedLength = display.debugWidth * display.debugHeight;
+      if (display.imageBytes.length !== expectedLength) {
+        throw new ViceMcpError(
+          'display_payload_invalid',
+          'capture_display received a display payload whose length does not match the reported debug dimensions.',
+          'protocol',
+          false,
+          {
+            debugWidth: display.debugWidth,
+            debugHeight: display.debugHeight,
+            expectedLength,
+            actualLength: display.imageBytes.length,
+          },
+        );
+      }
 
-    return {
-      imagePath,
-      width: display.innerWidth,
-      height: display.innerHeight,
-      debugWidth: display.debugWidth,
-      debugHeight: display.debugHeight,
-      debugOffsetX: display.debugOffsetX,
-      debugOffsetY: display.debugOffsetY,
-      bitsPerPixel: display.bitsPerPixel,
-    };
+      if (palette.items.length === 0) {
+        throw new ViceMcpError('display_palette_missing', 'capture_display received an empty display palette.', 'protocol', false);
+      }
+
+      if (
+        display.debugOffsetX + display.innerWidth > display.debugWidth ||
+        display.debugOffsetY + display.innerHeight > display.debugHeight
+      ) {
+        throw new ViceMcpError(
+          'display_crop_invalid',
+          'capture_display received crop geometry outside the display buffer bounds.',
+          'protocol',
+          false,
+          {
+            debugWidth: display.debugWidth,
+            debugHeight: display.debugHeight,
+            debugOffsetX: display.debugOffsetX,
+            debugOffsetY: display.debugOffsetY,
+            innerWidth: display.innerWidth,
+            innerHeight: display.innerHeight,
+          },
+        );
+      }
+
+      const rgbPixels = new Uint8Array(display.innerWidth * display.innerHeight * 3);
+      for (let y = 0; y < display.innerHeight; y += 1) {
+        for (let x = 0; x < display.innerWidth; x += 1) {
+          const sourceX = display.debugOffsetX + x;
+          const sourceY = display.debugOffsetY + y;
+          const sourceIndex = sourceY * display.debugWidth + sourceX;
+          const paletteIndex = display.imageBytes[sourceIndex]!;
+          const color = palette.items[paletteIndex];
+          if (!color) {
+            throw new ViceMcpError(
+              'display_palette_index_invalid',
+              'capture_display encountered a pixel index that is outside the current palette.',
+              'protocol',
+              false,
+              { paletteIndex, paletteSize: palette.items.length },
+            );
+          }
+          const targetIndex = (y * display.innerWidth + x) * 3;
+          rgbPixels[targetIndex] = color.red;
+          rgbPixels[targetIndex + 1] = color.green;
+          rgbPixels[targetIndex + 2] = color.blue;
+        }
+      }
+
+      await fs.mkdir(DISPLAY_CAPTURE_DIR, { recursive: true });
+      const imagePath = path.join(DISPLAY_CAPTURE_DIR, `capture-${Date.now()}-${process.pid}.png`);
+      await fs.writeFile(imagePath, encodePngRgb(display.innerWidth, display.innerHeight, rgbPixels));
+      await this.#settleDisplayToolState('capture_display', previousExecutionState);
+
+      return {
+        imagePath,
+        width: display.innerWidth,
+        height: display.innerHeight,
+        debugWidth: display.debugWidth,
+        debugHeight: display.debugHeight,
+        debugOffsetX: display.debugOffsetX,
+        debugOffsetY: display.debugOffsetY,
+        bitsPerPixel: display.bitsPerPixel,
+      };
+    });
   }
 
   async getDisplayState() {
@@ -2265,6 +2293,34 @@ export class ViceSession {
       }
 
       await sleep(BOOTSTRAP_POLL_MS);
+    }
+  }
+
+  async #withExecutionLock<T>(operation: () => Promise<T>): Promise<T> {
+    while (this.#executionOperationLock) {
+      await this.#executionOperationLock;
+    }
+    let resolve: () => void;
+    this.#executionOperationLock = new Promise((r) => (resolve = r));
+    try {
+      return await operation();
+    } finally {
+      this.#executionOperationLock = null;
+      resolve!();
+    }
+  }
+
+  async #withDisplayLock<T>(operation: () => Promise<T>): Promise<T> {
+    while (this.#displayOperationLock) {
+      await this.#displayOperationLock;
+    }
+    let resolve: () => void;
+    this.#displayOperationLock = new Promise((r) => (resolve = r));
+    try {
+      return await operation();
+    } finally {
+      this.#displayOperationLock = null;
+      resolve!();
     }
   }
 

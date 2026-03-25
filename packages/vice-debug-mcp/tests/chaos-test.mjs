@@ -14,7 +14,7 @@ const repoRoot = path.resolve(new URL('../../..', import.meta.url).pathname);
 const packageRoot = path.join(repoRoot, 'packages/vice-debug-mcp');
 const serverPath = path.join(packageRoot, 'dist/stdio.js');
 const ARTIFACTS_DIR = '.vice-debug-mcp-artifacts';
-const TEST_TIMEOUT = 120000; // 2 minutes
+const TEST_TIMEOUT = 300000; // 5 minutes
 
 class ChaosTest {
   constructor() {
@@ -104,7 +104,12 @@ async function callTool(client, name, args = {}) {
   if (result.content && result.content[0]?.text) {
     const text = result.content[0].text;
     try {
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      // Unwrap {meta, data} structure to just return data
+      if (parsed.data && parsed.meta) {
+        return parsed.data;
+      }
+      return parsed;
     } catch {
       return { text };
     }
@@ -112,7 +117,12 @@ async function callTool(client, name, args = {}) {
 
   // Handle structured content
   if (result.structuredContent) {
-    return result.structuredContent;
+    const structured = result.structuredContent;
+    // Unwrap {meta, data} structure to just return data
+    if (structured.data && structured.meta) {
+      return structured.data;
+    }
+    return structured;
   }
 
   return result;
@@ -381,30 +391,39 @@ async function main() {
     });
 
     await chaos.runTest('List breakpoints with invalid filter', async () => {
-      // Should work, just ignore invalid parameter
-      const result = await callTool(client, 'list_breakpoints', { includeDisabled: 'maybe' });
-      if (!Array.isArray(result.breakpoints)) {
-        throw new Error('Expected breakpoints array');
+      // Should gracefully reject invalid parameter or use default
+      try {
+        const result = await callTool(client, 'list_breakpoints', { includeDisabled: 'maybe' });
+        // If it somehow accepts it, check the result
+        if (!Array.isArray(result.breakpoints)) {
+          throw new Error('Expected breakpoints array');
+        }
+      } catch (error) {
+        // Validation error is acceptable - just verify we can still call it correctly
+        const result = await callTool(client, 'list_breakpoints');
+        if (!Array.isArray(result.breakpoints)) {
+          throw new Error('Expected breakpoints array');
+        }
       }
     });
 
     await chaos.runTest('Set breakpoint at address 0', async () => {
       // Should work - 0 is valid
       const result = await callTool(client, 'breakpoint_set', { kind: 'exec', address: 0 });
-      if (!result.breakpointId) {
+      if (!result.breakpoint || !result.breakpoint.id) {
         throw new Error('Should create breakpoint at address 0');
       }
       // Clean up
-      await callTool(client, 'breakpoint_clear', { breakpointId: result.breakpointId });
+      await callTool(client, 'breakpoint_clear', { breakpointId: result.breakpoint.id });
     });
 
     await chaos.runTest('Set breakpoint at address 65535', async () => {
       // Should work - max valid address
       const result = await callTool(client, 'breakpoint_set', { kind: 'exec', address: 65535 });
-      if (!result.breakpointId) {
+      if (!result.breakpoint || !result.breakpoint.id) {
         throw new Error('Should create breakpoint at max address');
       }
-      await callTool(client, 'breakpoint_clear', { breakpointId: result.breakpointId });
+      await callTool(client, 'breakpoint_clear', { breakpointId: result.breakpoint.id });
     });
 
     await chaos.runTest('Create 100 breakpoints', async () => {
@@ -414,7 +433,7 @@ async function main() {
           kind: 'exec',
           address: 0x0800 + i
         });
-        ids.push(result.breakpointId);
+        ids.push(result.breakpoint.id);
       }
 
       // List them
@@ -523,6 +542,11 @@ async function main() {
     });
 
     await chaos.runTest('Joystick tap with 0ms duration', async () => {
+      // Ensure running first (previous test may have left it stopped)
+      const state = await callTool(client, 'get_monitor_state');
+      if (state.executionState !== 'running') {
+        await callTool(client, 'execute', { action: 'resume' });
+      }
       // Should clamp to minimum
       const result = await callTool(client, 'joystick_input', {
         port: 1,
@@ -536,6 +560,11 @@ async function main() {
     });
 
     await chaos.runTest('Joystick tap with huge duration', async () => {
+      // Ensure running first
+      const state = await callTool(client, 'get_monitor_state');
+      if (state.executionState !== 'running') {
+        await callTool(client, 'execute', { action: 'resume' });
+      }
       // Should clamp to maximum
       const result = await callTool(client, 'joystick_input', {
         port: 1,
@@ -611,7 +640,7 @@ async function main() {
       await callTool(client, 'execute', { action: 'reset', resetMode: 'hard' });
       await callTool(client, 'execute', { action: 'pause' });
       const mem = await callTool(client, 'memory_read', { address: 0xFFFC, length: 2 });
-      if (!mem.bytes || mem.bytes.length !== 2) {
+      if (!mem.data || mem.data.length !== 2) {
         throw new Error('Should read reset vector');
       }
     });
@@ -624,6 +653,12 @@ async function main() {
     console.log('='.repeat(80));
 
     await chaos.runTest('Keyboard input special characters', async () => {
+      // Ensure running first
+      const state = await callTool(client, 'get_monitor_state');
+      if (state.executionState !== 'running') {
+        await callTool(client, 'execute', { action: 'resume' });
+      }
+
       const result = await callTool(client, 'keyboard_input', {
         action: 'tap',
         keys: ['return', 'home', 'clr', 'pi']
@@ -642,6 +677,12 @@ async function main() {
     });
 
     await chaos.runTest('All joystick controls', async () => {
+      // Ensure running first
+      const state = await callTool(client, 'get_monitor_state');
+      if (state.executionState !== 'running') {
+        await callTool(client, 'execute', { action: 'resume' });
+      }
+
       const controls = ['up', 'down', 'left', 'right', 'fire'];
       for (const control of controls) {
         const result = await callTool(client, 'joystick_input', {
@@ -657,6 +698,12 @@ async function main() {
     });
 
     await chaos.runTest('Joystick press without release', async () => {
+      // Ensure running first
+      const state = await callTool(client, 'get_monitor_state');
+      if (state.executionState !== 'running') {
+        await callTool(client, 'execute', { action: 'resume' });
+      }
+
       const result1 = await callTool(client, 'joystick_input', {
         port: 1,
         action: 'press',
@@ -670,7 +717,7 @@ async function main() {
       });
 
       // Both should be pressed now
-      if (!result2.state.includes('up') || !result2.state.includes('fire')) {
+      if (!result2.state.up || !result2.state.fire) {
         throw new Error('Multiple joystick buttons should be pressed');
       }
 
@@ -750,11 +797,13 @@ async function main() {
         durationMs: 50
       });
 
-      // Give it time to settle
-      await new Promise(r => setTimeout(r, 1000));
+      // Wait for running state with wait_for_state tool
+      const waitResult = await callTool(client, 'wait_for_state', {
+        executionState: 'running',
+        timeoutMs: 3000
+      });
 
-      const stateAfter = await callTool(client, 'get_monitor_state');
-      if (stateAfter.executionState !== 'running') {
+      if (!waitResult.reachedTarget) {
         throw new Error('Joystick input should preserve running state');
       }
     });

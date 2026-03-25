@@ -346,7 +346,7 @@ const joystickInputTool = createViceTool({
     port: joystickPortSchema.describe('Joystick port number'),
     action: inputActionSchema.describe('Joystick action to apply'),
     control: joystickControlSchema.describe('Joystick direction or fire control'),
-    durationMs: z.number().int().positive().optional().describe('Tap duration in milliseconds'),
+    durationMs: z.number().int().optional().describe('Tap duration in milliseconds (will be clamped to reasonable range)'),
   }),
   dataSchema: joystickInputResultSchema,
   execute: async (input) => await viceSession.joystickInput(input.port, input.action, input.control, input.durationMs),
