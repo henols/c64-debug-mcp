@@ -4,13 +4,11 @@
 !.github/**
 !package.json
 !package-lock.json
-!protocol.md
 !tsconfig.json
 !tsconfig.base.json
 !LICENSE
 !README.md
 !CHANGELOG.md
-!PUBLISHING.md
 !scripts/
 !scripts/**
 !src/
