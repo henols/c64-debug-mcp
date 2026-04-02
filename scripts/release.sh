@@ -110,31 +110,26 @@ EOF
       ${EDITOR:-nano} "$CHANGELOG_FILE"
     else
       # Auto-update changelog
-      # Replace [Unreleased] section with new version
+      # Insert new version section after [Unreleased]
       awk -v new_section="$(<"/tmp/changelog_update.txt")" '
         /## \[Unreleased\]/ {
           print $0
           print ""
           print new_section
-          in_unreleased=1
           next
         }
-        /^## \[/ && in_unreleased {
-          in_unreleased=0
-        }
-        !in_unreleased || !/^## \[/
+        { print }
       ' "$CHANGELOG_FILE" > /tmp/changelog_new.md
       mv /tmp/changelog_new.md "$CHANGELOG_FILE"
 
       # Update version links at bottom
       PREV_VERSION=$CURRENT_VERSION
-      LAST_LINE=$(tail -1 "$CHANGELOG_FILE")
 
-      # Add new version link
-      echo "[${NEW_VERSION}]: https://github.com/henols/c64-debug-mcp/compare/v${PREV_VERSION}...v${NEW_VERSION}" >> "$CHANGELOG_FILE"
+      # Replace [Unreleased] link
+      sed -i 's#\[Unreleased\]:.*#[Unreleased]: https://github.com/henols/c64-debug-mcp/compare/v'"${NEW_VERSION}"'...HEAD#' "$CHANGELOG_FILE"
 
-      # Update [Unreleased] link
-      sed -i "s|\[Unreleased\]:.*|\[Unreleased\]: https://github.com/henols/c64-debug-mcp/compare/v${NEW_VERSION}...HEAD|" "$CHANGELOG_FILE"
+      # Add new version link before [Unreleased] link
+      sed -i '/\[Unreleased\]:/i\['"${NEW_VERSION}"']: https://github.com/henols/c64-debug-mcp/compare/v'"${PREV_VERSION}"'...v'"${NEW_VERSION}"'' "$CHANGELOG_FILE"
     fi
   else
     echo -e "${YELLOW}No unreleased changes found. Opening editor...${NC}"
