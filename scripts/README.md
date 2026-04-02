@@ -22,7 +22,7 @@ bash scripts/release.sh
 
 - ✅ Interactive version selection (patch/minor/major)
 - ✅ Automatic version bumping in package.json
-- ✅ CHANGELOG.md updates with new version section
+- ✅ Automatic CHANGELOG.md updates (moves [Unreleased] to new version)
 - ✅ Git commit with release message
 - ✅ Git tag creation (v0.1.1, v0.2.0, etc.)
 - ✅ Automatic push to GitHub

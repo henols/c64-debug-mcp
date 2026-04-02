@@ -100,44 +100,38 @@ EOF
   UNRELEASED=$(sed -n '/## \[Unreleased\]/,/## \[/p' "$CHANGELOG_FILE" | sed '1d;$d' | sed '/^$/d')
 
   if [ -n "$UNRELEASED" ]; then
-    echo -e "${YELLOW}Current unreleased changes:${NC}"
+    echo -e "${YELLOW}Unreleased changes to be included:${NC}"
     echo "$UNRELEASED"
     echo
-    read -p "Do you want to add release notes manually? (y/N) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-      # Open editor for changelog
-      ${EDITOR:-nano} "$CHANGELOG_FILE"
-    else
-      # Auto-update changelog
-      # Insert new version section after [Unreleased]
-      awk -v new_section="$(<"/tmp/changelog_update.txt")" '
-        /## \[Unreleased\]/ {
-          print $0
-          print ""
-          print new_section
-          next
-        }
-        { print }
-      ' "$CHANGELOG_FILE" > /tmp/changelog_new.md
-      mv /tmp/changelog_new.md "$CHANGELOG_FILE"
 
-      # Update version links at bottom
-      PREV_VERSION=$CURRENT_VERSION
+    # Auto-update changelog
+    # Insert new version section after [Unreleased]
+    awk -v new_section="$(<"/tmp/changelog_update.txt")" '
+      /## \[Unreleased\]/ {
+        print $0
+        print ""
+        print new_section
+        next
+      }
+      { print }
+    ' "$CHANGELOG_FILE" > /tmp/changelog_new.md
+    mv /tmp/changelog_new.md "$CHANGELOG_FILE"
 
-      # Replace [Unreleased] link
-      sed -i "s#\\[Unreleased\\]:.*#[Unreleased]: https://github.com/henols/c64-debug-mcp/compare/v${NEW_VERSION}...HEAD#" "$CHANGELOG_FILE"
+    # Update version links at bottom
+    PREV_VERSION=$CURRENT_VERSION
 
-      # Add new version link before [Unreleased] link
-      sed -i "/\\[Unreleased\\]:/i\\[${NEW_VERSION}]: https://github.com/henols/c64-debug-mcp/compare/v${PREV_VERSION}...v${NEW_VERSION}" "$CHANGELOG_FILE"
-    fi
+    # Replace [Unreleased] link
+    sed -i "s#\\[Unreleased\\]:.*#[Unreleased]: https://github.com/henols/c64-debug-mcp/compare/v${NEW_VERSION}...HEAD#" "$CHANGELOG_FILE"
+
+    # Add new version link before [Unreleased] link
+    sed -i "/\\[Unreleased\\]:/i\\[${NEW_VERSION}]: https://github.com/henols/c64-debug-mcp/compare/v${PREV_VERSION}...v${NEW_VERSION}" "$CHANGELOG_FILE"
   else
-    echo -e "${YELLOW}No unreleased changes found. Opening editor...${NC}"
-    ${EDITOR:-nano} "$CHANGELOG_FILE"
+    echo -e "${YELLOW}No unreleased changes found in CHANGELOG.md${NC}"
+    echo -e "${YELLOW}Tip: Add changes to [Unreleased] section before releasing${NC}"
   fi
 else
-  echo -e "${YELLOW}No [Unreleased] section found. Opening editor...${NC}"
-  ${EDITOR:-nano} "$CHANGELOG_FILE"
+  echo -e "${YELLOW}No [Unreleased] section found in CHANGELOG.md${NC}"
+  echo -e "${YELLOW}Skipping CHANGELOG update${NC}"
 fi
 
 echo -e "${GREEN}CHANGELOG.md updated${NC}"
