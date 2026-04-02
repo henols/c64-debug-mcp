@@ -149,12 +149,12 @@ npm pack --dry-run
 npm publish --access public
 
 # 5. Verify
-npm view @c64mcp/c64-debug-mcp
+npm view c64-debug-mcp
 ```
 
 ## Package Information
 
-**Name**: `@c64mcp/c64-debug-mcp`
+**Name**: `c64-debug-mcp`
 **Version**: `0.1.0`
 **Size**: ~117 KB compressed, ~545 KB unpacked
 **Files**: 10 files (dist/, README.md, package.json)
@@ -172,7 +172,7 @@ Users can run the latest version automatically using `npx`:
   "mcpServers": {
     "c64-debug": {
       "command": "npx",
-      "args": ["-y", "@c64mcp/c64-debug-mcp"]
+      "args": ["-y", "c64-debug-mcp"]
     }
   }
 }
@@ -187,7 +187,7 @@ Users can run the latest version automatically using `npx`:
 
 ```bash
 # Global installation
-npm install -g @c64mcp/c64-debug-mcp
+npm install -g c64-debug-mcp
 
 # Claude Desktop config
 {
@@ -203,10 +203,10 @@ npm install -g @c64mcp/c64-debug-mcp
 
 ```bash
 # Run without installing
-npx @c64mcp/c64-debug-mcp
+npx c64-debug-mcp
 
 # Or install locally
-npm install @c64mcp/c64-debug-mcp
+npm install c64-debug-mcp
 ```
 
 ## Next Steps
@@ -237,7 +237,7 @@ npm install @c64mcp/c64-debug-mcp
 ## Support Resources
 
 - **GitHub Issues**: https://github.com/henols/c64-debug-mcp/issues
-- **npm Package**: https://www.npmjs.com/package/@c64mcp/c64-debug-mcp (after publishing)
+- **npm Package**: https://www.npmjs.com/package/c64-debug-mcp (after publishing)
 - **MCP Docs**: https://modelcontextprotocol.io/
 - **VICE Docs**: https://vice-emu.sourceforge.io/
 

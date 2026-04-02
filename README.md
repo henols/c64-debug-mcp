@@ -1,6 +1,6 @@
 # C64 Debug MCP
 
-[![npm version](https://badge.fury.io/js/@c64mcp%2Fc64-debug-mcp.svg)](https://www.npmjs.com/package/@c64mcp/c64-debug-mcp)
+[![npm version](https://badge.fury.io/js/c64-debug-mcp.svg)](https://www.npmjs.com/package/c64-debug-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/henols/c64-debug-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/henols/c64-debug-mcp/actions/workflows/ci.yml)
 
@@ -44,7 +44,7 @@ Add to your Claude Desktop config - uses `npx` to automatically run the latest v
   "mcpServers": {
     "c64-debug": {
       "command": "npx",
-      "args": ["-y", "@c64mcp/c64-debug-mcp"]
+      "args": ["-y", "c64-debug-mcp"]
     }
   }
 }
@@ -57,7 +57,7 @@ Add to your Claude Desktop config - uses `npx` to automatically run the latest v
 
 **Alternative:** If you prefer global installation:
 ```bash
-npm install -g @c64mcp/c64-debug-mcp
+npm install -g c64-debug-mcp
 ```
 Then use: `"command": "c64-debug-mcp"`
 

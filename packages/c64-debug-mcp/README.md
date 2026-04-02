@@ -1,6 +1,6 @@
 # C64 Debug MCP
 
-[![npm version](https://badge.fury.io/js/@c64mcp%2Fc64-debug-mcp.svg)](https://www.npmjs.com/package/@c64mcp/c64-debug-mcp)
+[![npm version](https://badge.fury.io/js/c64-debug-mcp.svg)](https://www.npmjs.com/package/c64-debug-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that enables AI assistants like Claude to debug and interact with Commodore 64 programs running in the VICE emulator.
@@ -33,13 +33,13 @@ Use `npx` to automatically run the latest version without installing:
 ### Option 2: Global Installation
 
 ```bash
-npm install -g @c64mcp/c64-debug-mcp
+npm install -g c64-debug-mcp
 ```
 
 ### Option 3: Local Installation
 
 ```bash
-npm install @c64mcp/c64-debug-mcp
+npm install c64-debug-mcp
 ```
 
 ## Usage
@@ -59,7 +59,7 @@ Add to your Claude Desktop configuration file:
   "mcpServers": {
     "c64-debug": {
       "command": "npx",
-      "args": ["-y", "@c64mcp/c64-debug-mcp"]
+      "args": ["-y", "c64-debug-mcp"]
     }
   }
 }
@@ -111,7 +111,7 @@ C64_DEBUG_HTTP_HEALTH_PATH=/healthz # Default: /healthz
      "mcpServers": {
        "c64-debug": {
          "command": "npx",
-         "args": ["-y", "@c64mcp/c64-debug-mcp"]
+         "args": ["-y", "c64-debug-mcp"]
        }
      }
    }
@@ -223,7 +223,7 @@ RemoteMonitorAddress=127.0.0.1:6502
 
 ### "Command not found: c64-debug-mcp"
 - Ensure global npm bin directory is in PATH: `npm config get prefix`
-- Or use npx: `npx @c64mcp/c64-debug-mcp`
+- Or use npx: `npx c64-debug-mcp`
 
 ### Node version errors
 - This package requires Node.js >= 22.13.0

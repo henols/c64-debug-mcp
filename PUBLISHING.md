@@ -1,6 +1,6 @@
 # Publishing Guide for C64 Debug MCP
 
-This guide explains how to publish new versions of `@c64mcp/c64-debug-mcp` to npm.
+This guide explains how to publish new versions of `c64-debug-mcp` to npm.
 
 ## Prerequisites
 
@@ -92,7 +92,7 @@ npm publish --tag beta
 
 Users install with:
 ```bash
-npm install @c64mcp/c64-debug-mcp@beta
+npm install c64-debug-mcp@beta
 ```
 
 ## Checklist Before Publishing
@@ -109,10 +109,10 @@ npm install @c64mcp/c64-debug-mcp@beta
 
 After publishing, verify:
 
-1. **Package page**: https://www.npmjs.com/package/@c64mcp/c64-debug-mcp
+1. **Package page**: https://www.npmjs.com/package/c64-debug-mcp
 2. **Test with npx (recommended)**:
    ```bash
-   npx -y @c64mcp/c64-debug-mcp --help
+   npx -y c64-debug-mcp --help
    ```
 3. **Test with Claude Desktop**: Update config and restart
    ```json
@@ -120,20 +120,20 @@ After publishing, verify:
      "mcpServers": {
        "c64-debug": {
          "command": "npx",
-         "args": ["-y", "@c64mcp/c64-debug-mcp"]
+         "args": ["-y", "c64-debug-mcp"]
        }
      }
    }
    ```
 4. **Test global installation** (optional):
    ```bash
-   npm install -g @c64mcp/c64-debug-mcp
+   npm install -g c64-debug-mcp
    c64-debug-mcp --help
    ```
 
 ### Why npx is Recommended
 
-Using `npx -y @c64mcp/c64-debug-mcp` in Claude Desktop config is recommended because:
+Using `npx -y c64-debug-mcp` in Claude Desktop config is recommended because:
 - ✅ No installation step required
 - ✅ Always runs latest published version
 - ✅ Users get updates automatically
@@ -178,7 +178,7 @@ smithery publish
 ⚠️ **Warning**: Unpublishing is discouraged and has a 24-hour window.
 
 ```bash
-npm unpublish @c64mcp/c64-debug-mcp@0.1.1
+npm unpublish c64-debug-mcp@0.1.1
 ```
 
 Instead, publish a fixed version:

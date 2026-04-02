@@ -28,10 +28,10 @@ jobs:
         run: npm ci
 
       - name: Build package
-        run: npm run build --workspace @c64mcp/c64-debug-mcp
+        run: npm run build --workspace c64-debug-mcp
 
       - name: Run type checks
-        run: npm run check --workspace @c64mcp/c64-debug-mcp
+        run: npm run check --workspace c64-debug-mcp
 
       - name: Verify package
         working-directory: ./packages/c64-debug-mcp

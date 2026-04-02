@@ -1,5 +1,5 @@
 {
-  "name": "@c64mcp/c64-debug-mcp",
+  "name": "c64-debug-mcp",
   "version": "0.1.0",
   "description": "Model Context Protocol server for C64 debugging via VICE emulator",
   "type": "module",
