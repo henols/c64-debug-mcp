@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [c64-debug-mcp
+v0.1.2
+
+up to date in 323ms
+
+71 packages are looking for funding
+  run `npm fund` for details] - 2026-04-02
+
 ### Changed
 - Renamed project from `vice-debug-mcp` to `c64-debug-mcp`
 - Renamed all environment variables from `VICE_DEBUG_*` to `C64_DEBUG_*`
