@@ -49,22 +49,16 @@ echo -e "${YELLOW}Select version bump type:${NC}"
 echo "  1) patch   - Bug fixes only       (${CURRENT_VERSION} → $(npx --yes semver -i patch ${CURRENT_VERSION}))"
 echo "  2) minor   - New features          (${CURRENT_VERSION} → $(npx --yes semver -i minor ${CURRENT_VERSION}))"
 echo "  3) major   - Breaking changes      (${CURRENT_VERSION} → $(npx --yes semver -i major ${CURRENT_VERSION}))"
-echo "  4) prepatch - Pre-release patch    (${CURRENT_VERSION} → $(npx --yes semver -i prepatch ${CURRENT_VERSION}))"
-echo "  5) preminor - Pre-release minor    (${CURRENT_VERSION} → $(npx --yes semver -i preminor ${CURRENT_VERSION}))"
-echo "  6) premajor - Pre-release major    (${CURRENT_VERSION} → $(npx --yes semver -i premajor ${CURRENT_VERSION}))"
-echo "  7) custom  - Enter version manually"
+echo "  4) custom  - Enter version manually"
 echo
 
-read -p "Enter choice (1-7): " choice
+read -p "Enter choice (1-4): " choice
 
 case $choice in
   1) BUMP_TYPE="patch" ;;
   2) BUMP_TYPE="minor" ;;
   3) BUMP_TYPE="major" ;;
-  4) BUMP_TYPE="prepatch" ;;
-  5) BUMP_TYPE="preminor" ;;
-  6) BUMP_TYPE="premajor" ;;
-  7)
+  4)
     read -p "Enter version number (e.g., 1.2.3): " CUSTOM_VERSION
     BUMP_TYPE=""
     ;;

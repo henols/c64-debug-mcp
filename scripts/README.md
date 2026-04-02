@@ -35,7 +35,6 @@ bash scripts/release.sh
    - `patch` - Bug fixes (0.1.0 → 0.1.1)
    - `minor` - New features (0.1.0 → 0.2.0)
    - `major` - Breaking changes (0.1.0 → 1.0.0)
-   - `prepatch/preminor/premajor` - Pre-releases
    - `custom` - Manual version entry
 3. Updates package.json version
 4. Updates CHANGELOG.md (moves [Unreleased] to new version)
@@ -64,9 +63,9 @@ Select version bump type:
   1) patch   - Bug fixes only       (0.1.0 → 0.1.1)
   2) minor   - New features          (0.1.0 → 0.2.0)
   3) major   - Breaking changes      (0.1.0 → 1.0.0)
-  ...
+  4) custom  - Enter version manually
 
-Enter choice (1-7): 1
+Enter choice (1-4): 1
 
 Updating version...
 Version bumped: 0.1.0 → 0.1.1
