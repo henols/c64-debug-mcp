@@ -33,7 +33,7 @@ jobs:
 
       - name: Publish to npm
         working-directory: ./packages/c64-debug-mcp
-        run: npm publish --access public --provenance
+        run: npm publish
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1

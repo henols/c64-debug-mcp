@@ -41,7 +41,7 @@ export const c64PartialRegisterValueSchema = z.object(
 
 export const debugStateSchema = z.object({
   executionState: executionStateSchema.describe('Current execution state of the emulator'),
-  lastStopReason: stopReasonSchema.describe('Reason the emulator most recently stopped in the monitor'),
+  lastStopReason: stopReasonSchema.describe('Reason the emulator stopped in the monitor'),
   programCounter: address16Schema.describe('Current program counter'),
   registers: c64RegisterValueSchema,
 });
