@@ -9,6 +9,7 @@
     "check": "npm run check --workspace c64-debug-mcp",
     "dev:http": "npm run dev:http --workspace c64-debug-mcp",
     "smoke:http": "npm run smoke:http --workspace c64-debug-mcp",
-    "smoke:http:dev": "npm run smoke:http:dev --workspace c64-debug-mcp"
+    "smoke:http:dev": "npm run smoke:http:dev --workspace c64-debug-mcp",
+    "release": "bash scripts/release.sh"
   }
 }

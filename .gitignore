@@ -11,6 +11,8 @@
 !README.md
 !CHANGELOG.md
 !PUBLISHING.md
+!scripts/
+!scripts/**
 !src/
 !src/**
 !packages/
