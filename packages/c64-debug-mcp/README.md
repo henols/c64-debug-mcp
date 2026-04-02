@@ -24,25 +24,29 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 
 ## Installation
 
-### Option 1: No Installation (Recommended)
+### Recommended: No Installation Required
 
 Use `npx` to automatically run the latest version without installing:
 
-**No setup required!** Just configure Claude Desktop (see below).
+**No setup required!** Just configure your MCP client (see below).
 
-### Option 2: Global Installation
-
-```bash
-npm install -g c64-debug-mcp
-```
-
-### Option 3: Local Installation
+### Local Installation (Optional)
 
 ```bash
 npm install c64-debug-mcp
 ```
 
 ## Usage
+
+### With Claude Code CLI (Recommended)
+
+Add the MCP server with a single command:
+
+```bash
+claude mcp add c64debug -- npx -y c64-debug-mcp
+```
+
+This automatically configures Claude Code to use the latest version via npx.
 
 ### With Claude Desktop
 
@@ -51,8 +55,6 @@ Add to your Claude Desktop configuration file:
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 **Linux**: `~/.config/Claude/claude_desktop_config.json`
-
-#### Recommended: Using npx (no installation, always latest)
 
 ```json
 {
@@ -65,26 +67,14 @@ Add to your Claude Desktop configuration file:
 }
 ```
 
-#### Alternative: Using global installation
-
-```json
-{
-  "mcpServers": {
-    "c64-debug": {
-      "command": "c64-debug-mcp"
-    }
-  }
-}
-```
-
 ### With Other MCP Clients
 
 ```bash
 # STDIO mode (for Claude Desktop and similar clients)
-c64-debug-mcp
+npx c64-debug-mcp
 
 # HTTP mode (for web-based clients)
-c64-debug-mcp-http
+npx c64-debug-mcp-http
 ```
 
 ### HTTP Server Configuration
@@ -221,9 +211,9 @@ RemoteMonitorAddress=127.0.0.1:6502
 - Check that port 6502 is not blocked by firewall
 - Verify VICE is listening: `netstat -an | grep 6502`
 
-### "Command not found: c64-debug-mcp"
-- Ensure global npm bin directory is in PATH: `npm config get prefix`
-- Or use npx: `npx c64-debug-mcp`
+### "Command not found"
+- Use npx to run without installation: `npx c64-debug-mcp`
+- For Claude Code CLI: `claude mcp add c64debug -- npx -y c64-debug-mcp`
 
 ### Node version errors
 - This package requires Node.js >= 22.13.0
