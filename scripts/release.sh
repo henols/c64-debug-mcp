@@ -126,10 +126,10 @@ EOF
       PREV_VERSION=$CURRENT_VERSION
 
       # Replace [Unreleased] link
-      sed -i 's#\[Unreleased\]:.*#[Unreleased]: https://github.com/henols/c64-debug-mcp/compare/v'"${NEW_VERSION}"'...HEAD#' "$CHANGELOG_FILE"
+      sed -i "s#\\[Unreleased\\]:.*#[Unreleased]: https://github.com/henols/c64-debug-mcp/compare/v${NEW_VERSION}...HEAD#" "$CHANGELOG_FILE"
 
       # Add new version link before [Unreleased] link
-      sed -i '/\[Unreleased\]:/i\['"${NEW_VERSION}"']: https://github.com/henols/c64-debug-mcp/compare/v'"${PREV_VERSION}"'...v'"${NEW_VERSION}"'' "$CHANGELOG_FILE"
+      sed -i "/\\[Unreleased\\]:/i\\[${NEW_VERSION}]: https://github.com/henols/c64-debug-mcp/compare/v${PREV_VERSION}...v${NEW_VERSION}" "$CHANGELOG_FILE"
     fi
   else
     echo -e "${YELLOW}No unreleased changes found. Opening editor...${NC}"
