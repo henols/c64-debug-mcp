@@ -166,7 +166,7 @@ fi
 # Commit and tag
 echo
 echo -e "${BLUE}Creating release commit and tag...${NC}"
-git add "$PACKAGE_DIR/package.json" "$CHANGELOG_FILE"
+git add "$PACKAGE_DIR/package.json" "$REPO_ROOT/package-lock.json" "$CHANGELOG_FILE"
 git commit -m "chore: release v${NEW_VERSION}
 
 Release notes in CHANGELOG.md
@@ -180,7 +180,9 @@ echo
 
 # Push
 echo -e "${BLUE}Pushing to GitHub...${NC}"
-git push origin main --tags
+git push origin main
+git push origin "v${NEW_VERSION}"
+echo -e "${GREEN}Pushed commit and tag to GitHub${NC}"
 
 echo
 echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
