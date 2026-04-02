@@ -43,9 +43,3 @@ jobs:
         working-directory: ./packages/c64-debug-mcp
         run: npm publish
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
