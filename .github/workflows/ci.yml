@@ -28,13 +28,12 @@ jobs:
         run: npm ci
 
       - name: Build package
-        run: npm run build --workspace c64-debug-mcp
+        run: npm run build
 
       - name: Run type checks
-        run: npm run check --workspace c64-debug-mcp
+        run: npm run check
 
       - name: Verify package
-        working-directory: ./packages/c64-debug-mcp
         run: |
           npm pack --dry-run
           echo "✅ Package verification successful"
