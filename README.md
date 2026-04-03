@@ -91,6 +91,6 @@ AI assistant will:
 
 MIT - see [LICENSE](LICENSE) file
 
-**Made with ❤️ for retro computing enthusiasts and AI-assisted development**
+**Made with ❤️ for C64 developers and AI-assisted retro coding**
 
 *"The C64 never gets old, it just gets smarter" 🎮*
