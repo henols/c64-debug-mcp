@@ -38,6 +38,31 @@ if [ -n "$(git status --porcelain)" ]; then
   fi
 fi
 
+# Pre-release checks
+echo -e "${BLUE}Running pre-release checks...${NC}"
+echo
+
+# Check TypeScript types
+echo -e "${YELLOW}Checking TypeScript types...${NC}"
+cd "$PACKAGE_DIR"
+if ! npm run check; then
+  echo -e "${RED}✗ TypeScript type check failed${NC}"
+  echo -e "${RED}Fix type errors before releasing${NC}"
+  exit 1
+fi
+echo -e "${GREEN}✓ TypeScript types OK${NC}"
+echo
+
+# Check build
+echo -e "${YELLOW}Testing build...${NC}"
+if ! npm run build; then
+  echo -e "${RED}✗ Build failed${NC}"
+  echo -e "${RED}Fix build errors before releasing${NC}"
+  exit 1
+fi
+echo -e "${GREEN}✓ Build successful${NC}"
+echo
+
 # Get current version
 cd "$PACKAGE_DIR"
 CURRENT_VERSION=$(node -p "require('./package.json').version")

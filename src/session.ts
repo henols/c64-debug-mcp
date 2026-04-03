@@ -1951,12 +1951,13 @@ export class ViceSession {
 
       // Check if spawn failed while we were waiting
       if (spawnError !== undefined) {
+        const err = spawnError as Error;
         throw new ViceMcpError(
           'spawn_failed',
-          `Failed to start VICE emulator '${binary}': ${spawnError.message}`,
+          `Failed to start VICE emulator '${binary}': ${err.message}`,
           'process_launch',
           false,
-          { binary, error: spawnError.message, resolvedPath: binaryCheck.path }
+          { binary, error: err.message, resolvedPath: binaryCheck.path }
         );
       }
 
@@ -1975,12 +1976,13 @@ export class ViceSession {
 
       // Enhance timeout errors with spawn error context if available
       if (error instanceof ViceMcpError && error.code === 'monitor_timeout' && spawnError !== undefined) {
+        const err = spawnError as Error;
         const enhancedError = new ViceMcpError(
           'emulator_crashed_on_startup',
-          `VICE emulator '${binary}' crashed during startup: ${spawnError.message}`,
+          `VICE emulator '${binary}' crashed during startup: ${err.message}`,
           'process_launch',
           false,
-          { binary, error: spawnError.message, resolvedPath: binaryCheck.path }
+          { binary, error: err.message, resolvedPath: binaryCheck.path }
         );
         this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'launch_failed'), makeWarning(enhancedError.message, 'launch_failed')];
         await this.#stopManagedProcess(true);
