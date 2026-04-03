@@ -106,7 +106,7 @@ const getMonitorStateTool = createViceTool({
 
 const getSessionStateTool = createViceTool({
   id: 'get_session_state',
-  description: 'Returns richer emulator session state including transport/process status, auto-resume state, and the most recent hit checkpoint when known.',
+  description: 'Returns emulator session state including transport/process status, auto-resume state, and the most recent hit checkpoint.',
   inputSchema: noInputSchema,
   dataSchema: sessionStateResultSchema,
   execute: async () => c64Session.snapshot(),
@@ -114,7 +114,7 @@ const getSessionStateTool = createViceTool({
 
 const getRegistersTool = createViceTool({
   id: 'get_registers',
-  description: 'Returns the current C64 register snapshot. This requires the emulator to already be stopped.',
+  description: 'Returns the current C64 register snapshot. Requires emulator to be stopped - call execute(action="pause") first if running.',
   inputSchema: noInputSchema,
   dataSchema: z.object({
     registers: c64RegisterValueSchema,
@@ -124,7 +124,7 @@ const getRegistersTool = createViceTool({
 
 const setRegistersTool = createViceTool({
   id: 'set_registers',
-  description: 'Sets one or more C64 registers by field name.',
+  description: 'Sets one or more C64 registers by field name. Requires emulator to be stopped - call execute(action="pause") first if running.',
   inputSchema: z.object({
     registers: c64PartialRegisterValueSchema,
   }),
@@ -164,7 +164,7 @@ const readMemoryTool = createViceTool({
 
 const writeMemoryTool = createViceTool({
   id: 'memory_write',
-  description: 'Writes raw byte values into the active C64 memory space.',
+  description: 'Writes raw byte values into the active C64 memory space. Requires emulator to be stopped - call execute(action="pause") first if running.',
   inputSchema: z
     .object({
       address: address16Schema.describe('Start address in the 16-bit C64 address space'),
@@ -289,7 +289,7 @@ const programLoadTool = createViceTool({
 
 const captureDisplayTool = createViceTool({
   id: 'capture_display',
-  description: 'Captures the current screen to a PNG file and returns the saved image path. If the emulator was running, the server restores running state before returning, subject to timeout.',
+  description: 'Captures the current screen to a PNG file and returns the saved image path.',
   inputSchema: z.object({
     useVic: z.boolean().default(true).describe('Whether to capture the VIC-II display when supported'),
   }),
@@ -299,7 +299,7 @@ const captureDisplayTool = createViceTool({
 
 const getDisplayStateTool = createViceTool({
   id: 'get_display_state',
-  description: 'Returns screen RAM, color RAM, the current graphics mode, screen memory addresses, and the current border and background colors. If the emulator was running, the server restores running state before returning, subject to timeout.',
+  description: 'Returns screen RAM, color RAM, the current graphics mode, screen memory addresses, and the current border and background colors.',
   inputSchema: noInputSchema,
   dataSchema: displayStateResultSchema,
   execute: async () => await c64Session.getDisplayState(),
@@ -307,7 +307,7 @@ const getDisplayStateTool = createViceTool({
 
 const getDisplayTextTool = createViceTool({
   id: 'get_display_text',
-  description: 'Returns the current text screen as readable text when the C64 is in a text mode. If the emulator was running, the server restores running state before returning, subject to timeout.',
+  description: 'Returns the current text screen as readable text when the C64 is in a text mode.',
   inputSchema: noInputSchema,
   dataSchema: displayTextResultSchema,
   execute: async () => await c64Session.getDisplayText(),
@@ -316,7 +316,7 @@ const getDisplayTextTool = createViceTool({
 const writeTextTool = createViceTool({
   id: 'write_text',
   description:
-    'Types text into the C64 while it is running. Supports escaped characters and PETSCII brace tokens like {RETURN}, {CLR}, {HOME}, {PI}, and color names; limit each request to 64 bytes.',
+    'Types text into the C64. Requires emulator to be running - call execute(action="resume") first if stopped. Supports escaped characters and PETSCII brace tokens like {RETURN}, {CLR}, {HOME}, {PI}, and color names. Limit 64 bytes per request.',
   inputSchema: z.object({
     text: z.string(),
   }),
@@ -329,7 +329,7 @@ const writeTextTool = createViceTool({
 
 const keyboardInputTool = createViceTool({
   id: 'keyboard_input',
-  description: 'Sends one to four keys or PETSCII tokens to the C64 while it is running. Use this for key presses, releases, and taps. If the emulator transiently stops, the server restores running state before returning, subject to timeout.',
+  description: 'Sends one to four keys or PETSCII tokens to the C64. Requires emulator to be running - call execute(action="resume") first if stopped. Use for key presses, releases, and taps.',
   inputSchema: z.object({
     action: inputActionSchema.describe('Use tap for a single key event or press/release for repeated buffered input'),
     keys: z.array(z.string().min(1)).min(1).max(4).describe('One to four literal keys or PETSCII token names such as RETURN, CLR, HOME, PI, LEFT, RED, or F1'),
@@ -341,7 +341,7 @@ const keyboardInputTool = createViceTool({
 
 const joystickInputTool = createViceTool({
   id: 'joystick_input',
-  description: 'Sends joystick input to C64 joystick port 1 or 2 while the C64 is running. If the emulator transiently stops, the server restores running state before returning, subject to timeout.',
+  description: 'Sends joystick input to C64 joystick port 1 or 2. Requires emulator to be running - call execute(action="resume") first if stopped.',
   inputSchema: z.object({
     port: joystickPortSchema.describe('Joystick port number'),
     action: inputActionSchema.describe('Joystick action to apply'),

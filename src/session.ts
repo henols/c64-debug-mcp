@@ -968,7 +968,7 @@ export class ViceSession {
   }
 
   async readMemory(start: number, end: number, bank = 0) {
-    await this.#ensurePausedForDebug('memory_read');
+    await this.#ensureReady();
     this.#validateRange(start, end);
     const response = await this.#client.readMemory(start, end, bank);
     return {
