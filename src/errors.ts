@@ -85,10 +85,15 @@ function publicMessageFor(error: ViceMcpError): string {
     case 'program_file_missing':
     case 'program_file_invalid':
       return error.message;
+    case 'binary_not_found':
+    case 'spawn_failed':
+    case 'emulator_crashed_on_startup':
+      return error.message;
     case 'port_allocation_failed':
     case 'port_in_use':
-    case 'monitor_timeout':
       return 'The server could not start a usable emulator session. Check the emulator configuration and try again.';
+    case 'monitor_timeout':
+      return error.message;
     case 'not_connected':
     case 'connection_closed':
     case 'socket_write_failed':
@@ -120,14 +125,21 @@ function publicMessageFor(error: ViceMcpError): string {
 }
 
 function publicDetailsFor(error: ViceMcpError): Record<string, unknown> | undefined {
-  switch (error.category) {
-    case 'validation':
-    case 'session_state':
-    case 'unsupported':
-    case 'io':
+  switch (error.code) {
+    case 'binary_not_found':
+    case 'spawn_failed':
+    case 'emulator_crashed_on_startup':
       return error.details;
     default:
-      return undefined;
+      switch (error.category) {
+        case 'validation':
+        case 'session_state':
+        case 'unsupported':
+        case 'io':
+          return error.details;
+        default:
+          return undefined;
+      }
   }
 }
 

@@ -1846,6 +1846,19 @@ export class ViceSession {
     await this.#portAllocator.ensureFree(port, host);
 
     const binary = config.binaryPath ?? DEFAULT_C64_BINARY;
+
+    // Check if binary exists before attempting to spawn
+    const binaryCheck = await checkBinaryExists(binary);
+    if (!binaryCheck.exists) {
+      throw new ViceMcpError(
+        'binary_not_found',
+        `VICE emulator binary '${binary}' not found. Please install VICE or configure the correct path using the 'binaryPath' setting.`,
+        'process_launch',
+        false,
+        { binary, searchedPath: process.env.PATH }
+      );
+    }
+
     const args = ['-autostartprgmode', '1', '-binarymonitor', '-binarymonitoraddress', `${host}:${port}`];
     if (config.arguments) {
       args.push(...splitCommandLine(config.arguments));
@@ -1866,11 +1879,18 @@ export class ViceSession {
 
     const env = await buildViceLaunchEnv();
 
+    let spawnError: Error | undefined = undefined;
     const child = spawn(binary, args, {
       cwd: config.workingDirectory ? path.resolve(config.workingDirectory) : undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // Capture spawn errors immediately
+    child.once('error', (err: Error) => {
+      spawnError = err;
+    });
+
     this.#process = child;
     this.#attachProcessLogging(child, binary, args);
     this.#bindProcessLifecycle(child);
@@ -1880,6 +1900,18 @@ export class ViceSession {
 
     try {
       await waitForMonitor(host, port, 5000);
+
+      // Check if spawn failed while we were waiting
+      if (spawnError !== undefined) {
+        throw new ViceMcpError(
+          'spawn_failed',
+          `Failed to start VICE emulator '${binary}': ${spawnError.message}`,
+          'process_launch',
+          false,
+          { binary, error: spawnError.message, resolvedPath: binaryCheck.path }
+        );
+      }
+
       await this.#client.connect(host, port);
       this.#transportState = 'connected';
       this.#connectedSince = nowIso();
@@ -1892,6 +1924,21 @@ export class ViceSession {
     } catch (error) {
       this.#processState = 'crashed';
       this.#transportState = 'faulted';
+
+      // Enhance timeout errors with spawn error context if available
+      if (error instanceof ViceMcpError && error.code === 'monitor_timeout' && spawnError !== undefined) {
+        const enhancedError = new ViceMcpError(
+          'emulator_crashed_on_startup',
+          `VICE emulator '${binary}' crashed during startup: ${spawnError.message}`,
+          'process_launch',
+          false,
+          { binary, error: spawnError.message, resolvedPath: binaryCheck.path }
+        );
+        this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'launch_failed'), makeWarning(enhancedError.message, 'launch_failed')];
+        await this.#stopManagedProcess(true);
+        throw enhancedError;
+      }
+
       this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'launch_failed'), makeWarning(String((error as Error).message ?? error), 'launch_failed')];
       await this.#stopManagedProcess(true);
       throw error;
@@ -2773,6 +2820,34 @@ function splitCommandLine(input: string): string[] {
   return result;
 }
 
+async function checkBinaryExists(binaryPath: string): Promise<{ exists: boolean; path?: string }> {
+  // If it's an absolute path, check directly
+  if (path.isAbsolute(binaryPath)) {
+    try {
+      await fs.access(binaryPath, fs.constants.X_OK);
+      return { exists: true, path: binaryPath };
+    } catch {
+      return { exists: false };
+    }
+  }
+
+  // Check if binary is in PATH
+  const pathEnv = process.env.PATH || '';
+  const pathDirs = pathEnv.split(path.delimiter);
+
+  for (const dir of pathDirs) {
+    const fullPath = path.join(dir, binaryPath);
+    try {
+      await fs.access(fullPath, fs.constants.X_OK);
+      return { exists: true, path: fullPath };
+    } catch {
+      // Continue checking other directories
+    }
+  }
+
+  return { exists: false };
+}
+
 async function waitForMonitor(host: string, port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -2782,7 +2857,7 @@ async function waitForMonitor(host: string, port: number, timeoutMs: number): Pr
     await sleep(100);
   }
 
-  throw new ViceMcpError('monitor_timeout', `Debugger monitor did not open on ${host}:${port}`, 'timeout', true, {
+  throw new ViceMcpError('monitor_timeout', `Debugger monitor did not open on ${host}:${port}. The emulator may have failed to start or crashed during startup.`, 'timeout', true, {
     host,
     port,
   });
