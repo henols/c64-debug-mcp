@@ -19,6 +19,7 @@ Debug Commodore 64 programs through conversation - AI-powered control of the VIC
 
 - Node.js >= 22.13.0
 - VICE Emulator (https://vice-emu.sourceforge.io/)
+- MCP-compatible AI assistant (Claude Code, Cline, Windsurf, etc.)
 
 ## Installation
 
