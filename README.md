@@ -3,7 +3,7 @@
 [![npm version](https://badge.fury.io/js/c64-debug-mcp.svg)](https://www.npmjs.com/package/c64-debug-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Model Context Protocol server that gives Claude direct control over the VICE C64 emulator for debugging 6502 assembly and BASIC programs.
+Model Context Protocol server that gives AI assistants direct control over the VICE C64 emulator for debugging 6502 assembly and BASIC programs.
 
 ## Features
 
@@ -43,12 +43,12 @@ Or add manually to your MCP client config:
 
 1. Add MCP server (see Installation above)
 
-2. Ask Claude to interact with C64:
+2. Ask your AI assistant to interact with C64:
    - "What's in memory at $D000?"
    - "Set a breakpoint at $1000"
    - "Load and run my program.prg"
 
-**Important:** The MCP server launches and controls VICE automatically. Claude owns the emulator process and can reset or restart it at any time. Don't use VICE manually or create valuable work in the emulator while debugging - any unsaved state may be lost when Claude resets the machine.
+**Important:** The MCP server launches and controls VICE automatically. Your AI assistant owns the emulator process and can reset or restart it at any time. Don't use VICE manually or create valuable work in the emulator while debugging - any unsaved state may be lost when it resets the machine.
 
 ## Example Workflows
 
@@ -57,7 +57,7 @@ Or add manually to your MCP client config:
 ```
 You: Load examples/hello.prg and set a breakpoint at $1000
 
-Claude will:
+AI assistant will:
 1. Load the program using program_load
 2. Set a breakpoint at $1000 using breakpoint_set
 3. Resume execution until breakpoint is hit
@@ -69,7 +69,7 @@ Claude will:
 ```
 You: What's the BASIC program in memory?
 
-Claude will:
+AI assistant will:
 1. Read memory from $0801 (BASIC start)
 2. Parse the BASIC tokens
 3. Show you the program listing
@@ -80,7 +80,7 @@ Claude will:
 ```
 You: Show me what's on the screen
 
-Claude will:
+AI assistant will:
 1. Capture the display using capture_display
 2. Save a PNG image
 3. Describe what's visible
