@@ -82,72 +82,17 @@ fi
 echo -e "${GREEN}Version bumped: ${CURRENT_VERSION} → ${NEW_VERSION}${NC}"
 echo
 
-# Update CHANGELOG
-echo -e "${BLUE}Updating CHANGELOG.md...${NC}"
-TODAY=$(date +%Y-%m-%d)
-CHANGELOG_FILE="$REPO_ROOT/CHANGELOG.md"
-
-# Check if changelog has unreleased section
-if grep -q "\[Unreleased\]" "$CHANGELOG_FILE"; then
-  # Create a temporary file with the updated changelog
-  cat > /tmp/changelog_update.txt << EOF
-
-## [${NEW_VERSION}] - ${TODAY}
-
-EOF
-
-  # Extract unreleased content (between [Unreleased] and next ##)
-  UNRELEASED=$(sed -n '/## \[Unreleased\]/,/## \[/p' "$CHANGELOG_FILE" | sed '1d;$d' | sed '/^$/d')
-
-  if [ -n "$UNRELEASED" ]; then
-    echo -e "${YELLOW}Unreleased changes to be included:${NC}"
-    echo "$UNRELEASED"
-    echo
-
-    # Auto-update changelog
-    # Insert new version section after [Unreleased]
-    awk -v new_section="$(<"/tmp/changelog_update.txt")" '
-      /## \[Unreleased\]/ {
-        print $0
-        print ""
-        print new_section
-        next
-      }
-      { print }
-    ' "$CHANGELOG_FILE" > /tmp/changelog_new.md
-    mv /tmp/changelog_new.md "$CHANGELOG_FILE"
-
-    # Update version links at bottom
-    PREV_VERSION=$CURRENT_VERSION
-
-    # Replace [Unreleased] link
-    sed -i "s#\\[Unreleased\\]:.*#[Unreleased]: https://github.com/henols/c64-debug-mcp/compare/v${NEW_VERSION}...HEAD#" "$CHANGELOG_FILE"
-
-    # Add new version link before [Unreleased] link
-    sed -i "/\\[Unreleased\\]:/i\\[${NEW_VERSION}]: https://github.com/henols/c64-debug-mcp/compare/v${PREV_VERSION}...v${NEW_VERSION}" "$CHANGELOG_FILE"
-  else
-    echo -e "${YELLOW}No unreleased changes found in CHANGELOG.md${NC}"
-    echo -e "${YELLOW}Tip: Add changes to [Unreleased] section before releasing${NC}"
-  fi
-else
-  echo -e "${YELLOW}No [Unreleased] section found in CHANGELOG.md${NC}"
-  echo -e "${YELLOW}Skipping CHANGELOG update${NC}"
-fi
-
-echo -e "${GREEN}CHANGELOG.md updated${NC}"
-echo
-
 # Show diff
 echo -e "${BLUE}Changes to be committed:${NC}"
 cd "$REPO_ROOT"
-git diff "$PACKAGE_DIR/package.json" "$CHANGELOG_FILE" | head -40
+git diff "$PACKAGE_DIR/package.json" | head -40
 echo
 
 # Confirm release
 echo -e "${YELLOW}Ready to release version ${NEW_VERSION}${NC}"
 echo
 echo "This will:"
-echo "  1. Commit package.json and CHANGELOG.md"
+echo "  1. Commit package.json"
 echo "  2. Create git tag v${NEW_VERSION}"
 echo "  3. Push to GitHub (main + tags)"
 echo "  4. Trigger automated npm publish via GitHub Actions"
@@ -158,18 +103,14 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
   echo "Aborted. Rolling back version change..."
   cd "$PACKAGE_DIR"
   npm version $CURRENT_VERSION --no-git-tag-version
-  cd "$REPO_ROOT"
-  git checkout "$CHANGELOG_FILE"
   exit 1
 fi
 
 # Commit and tag
 echo
 echo -e "${BLUE}Creating release commit and tag...${NC}"
-git add "$PACKAGE_DIR/package.json" "$REPO_ROOT/package-lock.json" "$CHANGELOG_FILE"
+git add "$PACKAGE_DIR/package.json" "$REPO_ROOT/package-lock.json"
 git commit -m "chore: release v${NEW_VERSION}
-
-Release notes in CHANGELOG.md
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
