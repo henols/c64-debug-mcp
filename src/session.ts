@@ -1056,6 +1056,20 @@ export class ViceSession {
   async continueExecution(waitUntilRunningStable = false) {
     return this.#withExecutionLock(async () => {
       await this.#ensureReady();
+
+      // Idempotent: if already running, return success immediately
+      if (this.#executionState === 'running') {
+        const runtime = this.#client.runtimeState();
+        const debugState = this.#lastRegisters == null ? await this.#readDebugState() : this.#buildDebugState(this.#lastRegisters);
+        return {
+          executionState: 'running' as const,
+          lastStopReason: this.#lastStopReason,
+          programCounter: runtime.programCounter ?? debugState.programCounter,
+          registers: debugState.registers,
+          warnings: [] as WarningItem[],
+        };
+      }
+
       if (this.#executionState !== 'stopped') {
         debuggerNotPausedError('execute resume', {
           executionState: this.#executionState,
@@ -1579,36 +1593,37 @@ export class ViceSession {
   }
 
   async writeText(text: string) {
-    await this.#ensureRunning('write_text');
-    const encoded = decodeWriteTextToPetscii(text);
-    if (encoded.length > MAX_WRITE_TEXT_BYTES) {
-      validationError('write_text exceeds the maximum allowed byte length for one request', {
+    return await this.#withAutoResumeForInput('write_text', async () => {
+      const encoded = decodeWriteTextToPetscii(text);
+      if (encoded.length > MAX_WRITE_TEXT_BYTES) {
+        validationError('write_text exceeds the maximum allowed byte length for one request', {
+          length: encoded.length,
+          max: MAX_WRITE_TEXT_BYTES,
+        });
+      }
+      this.#writeProcessLogLine(`[tx] write_text length=${encoded.length} text=${JSON.stringify(text)}`);
+      await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
+      await this.#settleInputState('write_text', 'running');
+      return {
+        sent: true,
         length: encoded.length,
-        max: MAX_WRITE_TEXT_BYTES,
-      });
-    }
-    this.#writeProcessLogLine(`[tx] write_text length=${encoded.length} text=${JSON.stringify(text)}`);
-    await this.#client.sendKeys(Buffer.from(encoded).toString('binary'));
-    await this.#settleInputState('write_text', 'running');
-    return {
-      sent: true,
-      length: encoded.length,
-    };
+      };
+    });
   }
 
   async keyboardInput(action: InputAction, keys: string[], durationMs?: number) {
-    await this.#ensureRunning('keyboard_input');
-    if (!Array.isArray(keys) || keys.length === 0 || keys.length > 4) {
-      validationError('keyboard_input requires between 1 and 4 keys', { keys });
-    }
+    return await this.#withAutoResumeForInput('keyboard_input', async () => {
+      if (!Array.isArray(keys) || keys.length === 0 || keys.length > 4) {
+        validationError('keyboard_input requires between 1 and 4 keys', { keys });
+      }
 
-    const resolvedKeys = keys.map((key) => resolveKeyboardInputKey(key));
-    const normalizedKeys = resolvedKeys.map((key) => key.canonical);
-    this.#writeProcessLogLine(
-      `[tx] keyboard_input action=${action} keys=${normalizedKeys.join(',')}${durationMs == null ? '' : ` durationMs=${durationMs}`}`,
-    );
+      const resolvedKeys = keys.map((key) => resolveKeyboardInputKey(key));
+      const normalizedKeys = resolvedKeys.map((key) => key.canonical);
+      this.#writeProcessLogLine(
+        `[tx] keyboard_input action=${action} keys=${normalizedKeys.join(',')}${durationMs == null ? '' : ` durationMs=${durationMs}`}`,
+      );
 
-    switch (action) {
+      switch (action) {
       case 'tap': {
         const duration = clampTapDuration(durationMs);
         const bytes = Uint8Array.from(resolvedKeys.flatMap((key) => Array.from(key.bytes)));
@@ -1678,44 +1693,46 @@ export class ViceSession {
           mode: 'buffered_text_repeat' as const,
         };
       }
-    }
+      }
+    });
   }
 
   async joystickInput(port: JoystickPort, action: InputAction, control: JoystickControl, durationMs?: number) {
-    await this.#ensureRunning('joystick_input');
-    const previousExecutionState = this.#executionState;
-    const bit = JOYSTICK_CONTROL_BITS[control];
-    if (bit == null) {
-      validationError('Unsupported joystick control', { control });
-    }
-    this.#writeProcessLogLine(
-      `[tx] joystick_input port=${port} action=${action} control=${control}${durationMs == null ? '' : ` durationMs=${durationMs}`}`,
-    );
-
-    switch (action) {
-      case 'tap': {
-        const duration = clampTapDuration(durationMs);
-        await this.#applyJoystickMask(port, this.#getJoystickMask(port) & ~bit);
-        await sleep(duration);
-        await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
-        break;
+    return await this.#withAutoResumeForInput('joystick_input', async () => {
+      const previousExecutionState = this.#executionState;
+      const bit = JOYSTICK_CONTROL_BITS[control];
+      if (bit == null) {
+        validationError('Unsupported joystick control', { control });
       }
-      case 'press':
-        await this.#applyJoystickMask(port, this.#getJoystickMask(port) & ~bit);
-        break;
-      case 'release':
-        await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
-        break;
-    }
-    await this.#settleInputState('joystick_input', previousExecutionState);
+      this.#writeProcessLogLine(
+        `[tx] joystick_input port=${port} action=${action} control=${control}${durationMs == null ? '' : ` durationMs=${durationMs}`}`,
+      );
 
-    return {
-      port,
-      action,
-      control,
-      applied: true,
-      state: this.#describeJoystickState(port),
-    };
+      switch (action) {
+        case 'tap': {
+          const duration = clampTapDuration(durationMs);
+          await this.#applyJoystickMask(port, this.#getJoystickMask(port) & ~bit);
+          await sleep(duration);
+          await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
+          break;
+        }
+        case 'press':
+          await this.#applyJoystickMask(port, this.#getJoystickMask(port) & ~bit);
+          break;
+        case 'release':
+          await this.#applyJoystickMask(port, this.#getJoystickMask(port) | bit);
+          break;
+      }
+      await this.#settleInputState('joystick_input', previousExecutionState);
+
+      return {
+        port,
+        action,
+        control,
+        applied: true,
+        state: this.#describeJoystickState(port),
+      };
+    });
   }
 
   async waitForState(
@@ -1787,6 +1804,33 @@ export class ViceSession {
         executionState: this.#executionState,
         lastStopReason: this.#lastStopReason,
       });
+    }
+  }
+
+  async #withAutoResumeForInput<T>(commandName: string, operation: () => Promise<T>): Promise<T> {
+    await this.#ensureReady();
+    this.#syncMonitorRuntimeState();
+
+    const wasRunning = this.#executionState === 'running';
+    const wasPaused = this.#explicitPauseActive;
+
+    // If not running, temporarily resume
+    if (!wasRunning) {
+      this.#writeProcessLogLine(`[${commandName}] auto-resuming for input operation`);
+      await this.#client.continueExecution();
+      await this.waitForState('running', 5000, INPUT_RUNNING_STABLE_MS);
+    }
+
+    try {
+      return await operation();
+    } finally {
+      // Restore pause state if it was explicitly paused
+      if (!wasRunning && wasPaused) {
+        this.#writeProcessLogLine(`[${commandName}] restoring paused state after input`);
+        await this.#client.ping();
+        await this.waitForState('stopped', 5000, 0);
+        this.#explicitPauseActive = true;
+      }
     }
   }
 

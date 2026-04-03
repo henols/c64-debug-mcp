@@ -184,7 +184,7 @@ const writeMemoryTool = createViceTool({
 
 const executeTool = createViceTool({
   id: 'execute',
-  description: 'Controls execution with pause, resume, step, step_over, step_out, or reset. Resume can optionally wait until running becomes stable.',
+  description: 'Controls execution with pause, resume, step, step_over, step_out, or reset. Pause and resume are idempotent (safe to call multiple times).',
   inputSchema: z.object({
     action: z.enum(['pause', 'resume', 'step', 'step_over', 'step_out', 'reset']),
     count: z.number().int().positive().default(1).describe('Instruction count for step and step_over actions'),
@@ -316,7 +316,7 @@ const getDisplayTextTool = createViceTool({
 const writeTextTool = createViceTool({
   id: 'write_text',
   description:
-    'Types text into the C64. Requires emulator to be running - call execute(action="resume") first if stopped. Supports escaped characters and PETSCII brace tokens like {RETURN}, {CLR}, {HOME}, {PI}, and color names. Limit 64 bytes per request.',
+    'Types text into the C64. Automatically resumes if stopped and restores pause state after. Supports escaped characters and PETSCII brace tokens like {RETURN}, {CLR}, {HOME}, {PI}, and color names. Limit 64 bytes per request.',
   inputSchema: z.object({
     text: z.string(),
   }),
@@ -329,7 +329,7 @@ const writeTextTool = createViceTool({
 
 const keyboardInputTool = createViceTool({
   id: 'keyboard_input',
-  description: 'Sends one to four keys or PETSCII tokens to the C64. Requires emulator to be running - call execute(action="resume") first if stopped. Use for key presses, releases, and taps.',
+  description: 'Sends one to four keys or PETSCII tokens to the C64. Automatically resumes if stopped and restores pause state after. Use for key presses, releases, and taps.',
   inputSchema: z.object({
     action: inputActionSchema.describe('Use tap for a single key event or press/release for repeated buffered input'),
     keys: z.array(z.string().min(1)).min(1).max(4).describe('One to four literal keys or PETSCII token names such as RETURN, CLR, HOME, PI, LEFT, RED, or F1'),
@@ -341,7 +341,7 @@ const keyboardInputTool = createViceTool({
 
 const joystickInputTool = createViceTool({
   id: 'joystick_input',
-  description: 'Sends joystick input to C64 joystick port 1 or 2. Requires emulator to be running - call execute(action="resume") first if stopped.',
+  description: 'Sends joystick input to C64 joystick port 1 or 2. Automatically resumes if stopped and restores pause state after.',
   inputSchema: z.object({
     port: joystickPortSchema.describe('Joystick port number'),
     action: inputActionSchema.describe('Joystick action to apply'),
