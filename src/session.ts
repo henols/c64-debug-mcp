@@ -793,6 +793,11 @@ export class ViceSession {
     });
   }
 
+  async getSessionState(): Promise<SessionState> {
+    await this.#ensureReady();
+    return this.snapshot();
+  }
+
   snapshot(): SessionState {
     return {
       transportState: this.#transportState,

@@ -109,7 +109,7 @@ const getSessionStateTool = createViceTool({
   description: 'Returns emulator session state including transport/process status, auto-resume state, and the most recent hit checkpoint.',
   inputSchema: noInputSchema,
   dataSchema: sessionStateResultSchema,
-  execute: async () => c64Session.snapshot(),
+  execute: async () => await c64Session.getSessionState(),
 });
 
 const getRegistersTool = createViceTool({
