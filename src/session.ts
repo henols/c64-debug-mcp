@@ -1288,7 +1288,6 @@ export class ViceSession {
   }) {
     const filePath = path.resolve(options.filePath);
     await this.#assertReadableProgramFile(filePath);
-    await this.#ensureRunning('program_load');
     this.#explicitPauseActive = false;
 
     const result = await this.autostartProgram(filePath, options.autoStart ?? true, options.fileIndex ?? 0);
