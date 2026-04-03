@@ -1,6 +1,6 @@
 {
   "name": "c64-debug-mcp",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Model Context Protocol server for C64 debugging via VICE emulator",
   "type": "module",
   "keywords": [
