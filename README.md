@@ -3,7 +3,7 @@
 [![npm version](https://badge.fury.io/js/c64-debug-mcp.svg)](https://www.npmjs.com/package/c64-debug-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that enables AI assistants like Claude to debug and interact with Commodore 64 programs running in the VICE emulator.
+Model Context Protocol server that gives Claude direct control over the VICE C64 emulator for debugging 6502 assembly and BASIC programs.
 
 ## Features
 
