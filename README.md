@@ -3,7 +3,7 @@
 [![npm version](https://badge.fury.io/js/c64-debug-mcp.svg)](https://www.npmjs.com/package/c64-debug-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Model Context Protocol server that gives AI assistants direct control over the VICE C64 emulator for debugging 6502 assembly and BASIC programs.
+Debug Commodore 64 programs through conversation - AI-powered control of the VICE emulator for 6502 assembly and BASIC.
 
 ## Features
 
