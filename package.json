@@ -1,13 +1,56 @@
 {
-  "name": "c64mcp-workspace",
-  "private": true,
-  "workspaces": [
-    "packages/*"
+  "name": "c64-debug-mcp",
+  "version": "0.1.8",
+  "description": "Model Context Protocol server for C64 debugging via VICE emulator",
+  "type": "module",
+  "keywords": [
+    "mcp",
+    "c64",
+    "commodore",
+    "vice",
+    "debugger",
+    "retro",
+    "6502",
+    "model-context-protocol",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/henols/c64-debug-mcp.git"
+  },
+  "bugs": "https://github.com/henols/c64-debug-mcp/issues",
+  "homepage": "https://github.com/henols/c64-debug-mcp#readme",
+  "author": "Henrik Olsson",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "c64-debug-mcp": "dist/stdio.js",
+    "c64-debug-mcp-http": "dist/http.js"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "npm run build --workspace c64-debug-mcp",
-    "check": "npm run check --workspace c64-debug-mcp",
-    "dev:http": "npm run dev:http --workspace c64-debug-mcp",
+    "build": "tsup src/stdio.ts src/http.ts --format esm,cjs --dts --no-splitting --clean",
+    "check": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run check",
+    "dev:http": "C64_DEBUG_CONSOLE_LOGS=1 /home/henrik/.nvm/versions/node/v22.13.0/bin/node node_modules/tsx/dist/cli.mjs watch src/http.ts",
     "release": "bash scripts/release.sh"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.15.0",
+    "@mastra/mcp": "^1.3.1",
+    "@mastra/schema-compat": "^1.2.6",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2"
   }
 }

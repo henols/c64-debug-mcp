@@ -2,42 +2,59 @@
 
 [![npm version](https://badge.fury.io/js/c64-debug-mcp.svg)](https://www.npmjs.com/package/c64-debug-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/henols/c64-debug-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/henols/c64-debug-mcp/actions/workflows/ci.yml)
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that enables AI assistants like Claude to debug and interact with Commodore 64 programs running in the VICE emulator.
 
-> 🎮 **Bridge the gap between modern AI and retro computing!**
+## Features
 
-## What is this?
+- 🎮 **Full C64 Control**: Pause, resume, step, and reset the emulator
+- 🔍 **Memory Operations**: Read, write, search, and compare memory
+- 🐛 **Breakpoints**: Set execution breakpoints and watchpoints
+- 📊 **Register Access**: Get and set CPU registers (A, X, Y, PC, SP, flags)
+- 📸 **Display Capture**: Capture screen state and text content
+- ⌨️ **Input Control**: Send keyboard and joystick input
+- 📝 **Program Loading**: Load PRG files and manage execution
 
-This MCP server allows Claude (or any MCP-compatible AI assistant) to:
-- Debug 6502 assembly code running on a C64 emulator
-- Inspect and modify memory in real-time
-- Set breakpoints and step through code
-- Capture screen output and send input
-- Load and run C64 programs
+## Requirements
 
-Think of it as giving Claude a direct connection to your C64's brain through VICE's binary monitor protocol.
+- **Node.js**: >= 22.13.0
+- **VICE Emulator**: Any recent version with binary monitor support
+  - Download from: https://vice-emu.sourceforge.io/
+  - Supports: x64sc (C64), x128 (C128), xvic (VIC-20), xpet (PET), and others
 
-## Quick Start
+## Installation
+
+### Recommended: No Installation Required
+
+Use `npx` to automatically run the latest version without installing:
+
+**No setup required!** Just configure your MCP client (see below).
+
+### Local Installation (Optional)
 
 ```bash
-# 1. Start VICE with remote monitor
-x64sc -remotemonitor -remotemonitoraddress 127.0.0.1:6502
-
-# 2. Add to Claude Desktop config (no installation needed!)
-#    See config below
-
-# 3. Ask Claude: "What's at memory address $D000?"
+npm install c64-debug-mcp
 ```
 
-## Installation & Configuration
+## Usage
 
-See [packages/c64-debug-mcp/README.md](packages/c64-debug-mcp/README.md) for detailed installation and usage instructions.
+### With Claude Code CLI (Recommended)
 
-### Claude Desktop Setup (Recommended)
+Add the MCP server with a single command:
 
-Add to your Claude Desktop config - uses `npx` to automatically run the latest version:
+```bash
+claude mcp add c64debug -- npx -y c64-debug-mcp
+```
+
+This automatically configures Claude Code to use the latest version via npx.
+
+### With Claude Desktop
+
+Add to your Claude Desktop configuration file:
+
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+**Linux**: `~/.config/Claude/claude_desktop_config.json`
 
 ```json
 {
@@ -50,83 +67,165 @@ Add to your Claude Desktop config - uses `npx` to automatically run the latest v
 }
 ```
 
-**Benefits:**
-- ✅ No installation required
-- ✅ Always uses latest version
-- ✅ Works immediately after restart
+### With Other MCP Clients
 
-**Alternative:** If you prefer global installation:
 ```bash
-npm install -g c64-debug-mcp
-```
-Then use: `"command": "c64-debug-mcp"`
+# STDIO mode (for Claude Desktop and similar clients)
+npx c64-debug-mcp
 
-## Features
-
-✅ **Execution Control** - Pause, resume, step through code, reset emulator
-✅ **Memory Operations** - Read/write memory, search patterns
-✅ **Breakpoints** - Set execution and watchpoint breakpoints
-✅ **Register Access** - Inspect and modify CPU registers
-✅ **Display Capture** - Screenshot and text extraction
-✅ **Input Control** - Send keyboard and joystick commands
-✅ **Program Loading** - Load PRG files with auto-start
-
-## Example Use Cases
-
-### AI-Assisted Debugging
-```
-You: "My sprite isn't appearing. Can you check the VIC-II registers?"
-
-Claude:
-1. Reads memory at $D000-$D02E (VIC-II registers)
-2. Checks sprite enable register ($D015)
-3. Verifies sprite data pointer
-4. Suggests fixes
+# HTTP mode (for web-based clients)
+npx c64-debug-mcp-http
 ```
 
-### Automated Testing
-```
-You: "Load test.prg and verify it prints HELLO"
+### HTTP Server Configuration
 
-Claude:
-1. Loads test.prg
-2. Waits for program to run
-3. Captures screen text
-4. Verifies output
+The HTTP server can be configured via environment variables:
+
+```bash
+C64_DEBUG_HTTP_HOST=127.0.0.1      # Default: 127.0.0.1
+C64_DEBUG_HTTP_PORT=39080          # Default: 39080
+C64_DEBUG_HTTP_PATH=/mcp           # Default: /mcp
+C64_DEBUG_HTTP_HEALTH_PATH=/healthz # Default: /healthz
+```
+
+## Quick Start
+
+1. **Start VICE emulator** with binary monitor enabled:
+   ```bash
+   x64sc -remotemonitor -remotemonitoraddress 127.0.0.1:6502
+   ```
+
+2. **Configure Claude Desktop** (add to config file):
+   ```json
+   {
+     "mcpServers": {
+       "c64-debug": {
+         "command": "npx",
+         "args": ["-y", "c64-debug-mcp"]
+       }
+     }
+   }
+   ```
+
+3. **Restart Claude Desktop**
+
+4. **Ask Claude to interact with C64**:
+   - "What's in memory at $D000?"
+   - "Set a breakpoint at $1000"
+   - "Load and run my program.prg"
+   - "Show me the screen content"
+
+## Available Tools
+
+### Execution Control
+- `execute` - Pause, resume, step, step_over, step_out, or reset
+- `wait_for_state` - Wait for running/stopped state
+- `program_load` - Load PRG files with optional auto-start
+
+### Memory Operations
+- `memory_read` - Read memory by address and length
+- `memory_write` - Write bytes to memory
+- `get_registers` - Get CPU register values
+- `set_registers` - Set CPU register values
+
+### Breakpoints
+- `breakpoint_set` - Create execution or watchpoint breakpoints
+- `breakpoint_clear` - Remove a breakpoint
+- `list_breakpoints` - List all breakpoints
+
+### Display & Input
+- `capture_display` - Capture screen to PNG
+- `get_display_state` - Get screen RAM, color RAM, and graphics mode
+- `get_display_text` - Get text screen content
+- `write_text` - Type text with PETSCII support
+- `keyboard_input` - Send key presses/releases/taps
+- `joystick_input` - Send joystick commands
+
+### State Monitoring
+- `get_monitor_state` - Get execution state and stop reason
+- `get_session_state` - Get detailed emulator session state
+
+## Example Workflows
+
+### Debugging a Program
+
+```
+You: Load examples/hello.prg and set a breakpoint at $1000
+
+Claude will:
+1. Load the program using program_load
+2. Set a breakpoint at $1000 using breakpoint_set
+3. Resume execution until breakpoint is hit
+4. Show you the register state when stopped
 ```
 
 ### Memory Analysis
-```
-You: "Find all JSR $FFD2 calls in memory"
-
-Claude:
-1. Searches memory for pattern [0x20, 0xD2, 0xFF]
-2. Lists all locations
-3. Disassembles surrounding code
-```
-
-## Repository Structure
 
 ```
-c64-debug-mcp/
-├── packages/
-│   └── c64-debug-mcp/     # Main MCP server package
-│       ├── src/           # TypeScript source
-│       ├── tests/         # Chaos and smoke tests
-│       └── README.md      # Package documentation
-├── .github/
-│   └── workflows/         # CI/CD automation
-├── CHANGELOG.md           # Version history
-├── PUBLISHING.md          # Publishing guide
-└── README.md             # This file
+You: What's the BASIC program in memory?
+
+Claude will:
+1. Read memory from $0801 (BASIC start)
+2. Parse the BASIC tokens
+3. Show you the program listing
 ```
+
+### Screen Capture
+
+```
+You: Show me what's on the screen
+
+Claude will:
+1. Capture the display using capture_display
+2. Save a PNG image
+3. Describe what's visible
+```
+
+## Configuration
+
+### Environment Variables
+
+- `C64_DEBUG_CONSOLE_LOGS` - Enable verbose logging (1, true, yes, on)
+- `C64_DEBUG_SERVER_NODE` - Path to Node.js executable for smoke tests
+- `C64_DEBUG_HTTP_*` - HTTP server configuration (see above)
+
+### VICE Connection
+
+The MCP server connects to VICE on `localhost:6502` by default. Ensure VICE is started with:
+
+```bash
+x64sc -remotemonitor -remotemonitoraddress 127.0.0.1:6502
+```
+
+Or add to your `~/.vice/vicerc`:
+
+```
+RemoteMonitor=1
+RemoteMonitorAddress=127.0.0.1:6502
+```
+
+## Troubleshooting
+
+### "Cannot connect to VICE"
+- Ensure VICE is running with `-remotemonitor` flag
+- Check that port 6502 is not blocked by firewall
+- Verify VICE is listening: `netstat -an | grep 6502`
+
+### "Command not found"
+- Use npx to run without installation: `npx c64-debug-mcp`
+- For Claude Code CLI: `claude mcp add c64debug -- npx -y c64-debug-mcp`
+
+### Node version errors
+- This package requires Node.js >= 22.13.0
+- Check version: `node --version`
+- Install latest: https://nodejs.org/
 
 ## Development
 
 ```bash
 # Clone repository
 git clone https://github.com/henols/c64-debug-mcp.git
-cd c64-debug-mcp
+cd c64-debug-mcp/packages/c64-debug-mcp
 
 # Install dependencies
 npm install
@@ -135,69 +234,44 @@ npm install
 npm run build
 
 # Run tests
-cd packages/c64-debug-mcp
 npm run smoke:http
+
+# Type check
+npm run check
 ```
 
-## Requirements
+## Architecture
 
-- **Node.js** >= 22.13.0
-- **VICE Emulator** (any recent version)
-- **Claude Desktop** or other MCP-compatible client
-
-## Documentation
-
-- [Package README](packages/c64-debug-mcp/README.md) - Installation and usage
-- [Publishing Guide](PUBLISHING.md) - How to publish new versions
-- [Changelog](CHANGELOG.md) - Version history
-- [MCP Specification](https://spec.modelcontextprotocol.io/)
-- [VICE Monitor Protocol](https://vice-emu.sourceforge.io/vice_13.html#SEC338)
+- **TypeScript** with strict type checking
+- **Zod** for schema validation
+- **Mastra MCP** framework for protocol implementation
+- **VICE Binary Monitor Protocol** for emulator communication
 
 ## Contributing
 
-Contributions welcome! Please:
+Contributions are welcome! Please:
 
 1. Fork the repository
 2. Create a feature branch
-3. Write tests for new features
+3. Make your changes with tests
 4. Submit a pull request
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines (coming soon).
-
-## Testing
-
-The project includes comprehensive test suites:
-
-- **Chaos Test**: 58 stress tests covering edge cases and race conditions
-- **Smoke Tests**: Basic functionality verification
-- **CI Pipeline**: Automated testing on every push
-
-All tests currently passing ✅
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file for details
+
+## Resources
+
+- [Model Context Protocol Specification](https://spec.modelcontextprotocol.io/)
+- [VICE Emulator](https://vice-emu.sourceforge.io/)
+- [VICE Binary Monitor Protocol](https://vice-emu.sourceforge.io/vice_13.html#SEC338)
+- [Smithery MCP Registry](https://smithery.ai/)
 
 ## Acknowledgments
 
-- Built with [Model Context Protocol](https://modelcontextprotocol.io) by Anthropic
-- Powered by [VICE](https://vice-emu.sourceforge.io/) emulator
-- Uses [Mastra MCP](https://github.com/mastra-ai/mastra) framework
-
-## Support
-
-- 🐛 [Report Issues](https://github.com/henols/c64-debug-mcp/issues)
-- 💬 [Discussions](https://github.com/henols/c64-debug-mcp/discussions)
-- 📧 Contact: Create an issue for support
-
-## Related Projects
-
-- [vice-bridge-net](https://github.com/rosc77/vice-bridge) - .NET VICE monitor library
-- [Smithery](https://smithery.ai/) - MCP server registry
-- [MCP Servers](https://github.com/modelcontextprotocol/servers) - Official MCP examples
+Built with the [Model Context Protocol](https://modelcontextprotocol.io) by Anthropic.
+Powered by [VICE](https://vice-emu.sourceforge.io/) - the Versatile Commodore Emulator.
 
 ---
 
-**Made with ❤️ for retro computing enthusiasts and AI-assisted development**
-
-*"The C64 never gets old, it just gets smarter" 🎮*
+**Happy C64 debugging! 🎮**

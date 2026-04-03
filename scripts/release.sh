@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_DIR="$REPO_ROOT/packages/c64-debug-mcp"
+PACKAGE_DIR="$REPO_ROOT"
 
 echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}   C64 Debug MCP - Release Script${NC}"

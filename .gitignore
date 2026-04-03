@@ -13,8 +13,6 @@
 !scripts/**
 !src/
 !src/**
-!packages/
-!packages/**
 
 node_modules/
 .mastra/
@@ -22,4 +20,3 @@ node_modules/
 obj/
 bin/
 dist/
-packages/*/dist/
