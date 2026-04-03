@@ -225,16 +225,13 @@ RemoteMonitorAddress=127.0.0.1:6502
 ```bash
 # Clone repository
 git clone https://github.com/henols/c64-debug-mcp.git
-cd c64-debug-mcp/packages/c64-debug-mcp
+cd c64-debug-mcp
 
 # Install dependencies
 npm install
 
 # Build
 npm run build
-
-# Run tests
-npm run smoke:http
 
 # Type check
 npm run check
