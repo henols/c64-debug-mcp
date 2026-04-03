@@ -18,7 +18,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that en
 ## Requirements
 
 - Node.js >= 22.13.0
-- VICE Emulator with binary monitor support (https://vice-emu.sourceforge.io/)
+- VICE Emulator (https://vice-emu.sourceforge.io/)
 
 ## Installation
 
@@ -31,7 +31,7 @@ Or add manually to your MCP client config:
 ```json
 {
   "mcpServers": {
-    "c64-debug": {
+    "c64debug": {
       "command": "npx",
       "args": ["-y", "c64-debug-mcp"]
     }
@@ -41,17 +41,14 @@ Or add manually to your MCP client config:
 
 ## Quick Start
 
-1. Start VICE with binary monitor:
-   ```bash
-   x64sc -remotemonitor -remotemonitoraddress 127.0.0.1:6502
-   ```
+1. Add MCP server (see Installation above)
 
-2. Add MCP server (see Installation above)
-
-3. Ask Claude to interact with C64:
+2. Ask Claude to interact with C64:
    - "What's in memory at $D000?"
    - "Set a breakpoint at $1000"
    - "Load and run my program.prg"
+
+**Important:** The MCP server launches and controls VICE automatically. Claude owns the emulator process and can reset or restart it at any time. Don't use VICE manually or create valuable work in the emulator while debugging - any unsaved state may be lost when Claude resets the machine.
 
 ## Example Workflows
 
