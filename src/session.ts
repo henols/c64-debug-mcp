@@ -560,6 +560,8 @@ const DEFAULT_INPUT_TAP_MS = 75;
 const DEFAULT_KEYBOARD_REPEAT_MS = 100;
 const VICE_PROCESS_LOG_PATH = path.join(os.tmpdir(), 'c64-debug-mcp-x64sc.log');
 const DISPLAY_CAPTURE_DIR = path.resolve(process.cwd(), '.vice-debug-mcp-artifacts');
+const CLEANUP_ENABLED = !/^(0|false|no|off)$/i.test(process.env.C64_CLEANUP_SCREENSHOTS ?? '');
+const CLEANUP_MAX_AGE_MINUTES = Number.parseInt(process.env.C64_CLEANUP_MAX_AGE_MINUTES ?? '20', 10);
 const MIRROR_EMULATOR_LOGS_TO_STDERR = /^(1|true|yes|on)$/i.test(process.env.C64_DEBUG_CONSOLE_LOGS ?? '');
 const EXECUTION_EVENT_WAIT_MS = 1000;
 const EXECUTION_SETTLE_DELAY_MS = 2000;
@@ -760,6 +762,7 @@ export class ViceSession {
 
   constructor(portAllocator = new PortAllocator()) {
     this.#portAllocator = portAllocator;
+    void this.#cleanupOldScreenshots();
     this.#client.on('response', (response) => {
       this.#lastResponseAt = nowIso();
       this.#writeProcessLogLine(`[monitor-response] type=${response.type} requestId=${response.requestId} errorCode=${response.errorCode}`);
@@ -2680,6 +2683,54 @@ export class ViceSession {
     }
 
     this.#syncMonitorRuntimeState();
+  }
+
+  async #cleanupOldScreenshots(): Promise<void> {
+    if (!CLEANUP_ENABLED) {
+      return;
+    }
+
+    try {
+      const maxAgeMinutes = Math.max(1, Math.min(525600, CLEANUP_MAX_AGE_MINUTES)); // 1 min to 1 year
+      const maxAgeMs = maxAgeMinutes * 60 * 1000;
+      const cutoffTime = Date.now() - maxAgeMs;
+
+      this.#writeProcessLogLine(`[cleanup] scanning ${DISPLAY_CAPTURE_DIR} for screenshots older than ${maxAgeMinutes}m`);
+
+      let entries;
+      try {
+        entries = await fs.readdir(DISPLAY_CAPTURE_DIR);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return; // Directory doesn't exist yet - nothing to clean
+        }
+        throw error;
+      }
+
+      const pngFiles = entries.filter(name => name.endsWith('.png') && name.startsWith('capture-'));
+      let deletedCount = 0;
+      let errorCount = 0;
+
+      for (const filename of pngFiles) {
+        try {
+          const filePath = path.join(DISPLAY_CAPTURE_DIR, filename);
+          const stats = await fs.stat(filePath);
+
+          if (stats.mtime.getTime() < cutoffTime) {
+            await fs.unlink(filePath);
+            deletedCount++;
+          }
+        } catch (error) {
+          errorCount++;
+          this.#writeProcessLogLine(`[cleanup] failed to delete ${filename}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      this.#writeProcessLogLine(`[cleanup] completed: ${deletedCount} deleted, ${errorCount} errors, ${pngFiles.length - deletedCount - errorCount} retained`);
+
+    } catch (error) {
+      this.#writeProcessLogLine(`[cleanup] failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
 }
