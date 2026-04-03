@@ -72,10 +72,10 @@ esac
 echo
 echo -e "${BLUE}Updating version...${NC}"
 if [ -n "$BUMP_TYPE" ]; then
-  NEW_VERSION=$(npm version $BUMP_TYPE --no-git-tag-version 2>/dev/null | sed -n '2p')
+  NEW_VERSION=$(npm version $BUMP_TYPE --no-git-tag-version 2>&1 | sed -n '2p')
   NEW_VERSION=${NEW_VERSION#v}  # Remove 'v' prefix
 else
-  npm version $CUSTOM_VERSION --no-git-tag-version 2>/dev/null | sed -n '2p' >/dev/null
+  npm version $CUSTOM_VERSION --no-git-tag-version 2>&1 | sed -n '2p' >/dev/null
   NEW_VERSION=$CUSTOM_VERSION
 fi
 
