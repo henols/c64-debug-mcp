@@ -204,7 +204,7 @@ const executeTool = createViceTool({
   inputSchema: z.object({
     action: z.enum(['pause', 'resume', 'step', 'step_over', 'step_out', 'reset']),
     count: z.number().int().positive().default(1).describe('Instruction count for step and step_over actions'),
-    resetMode: resetModeSchema.default('soft').describe('Reset mode when action is reset'),
+    resetMode: resetModeSchema.default('soft').describe('Reset mode: soft (CPU reset), hard (full machine reset), or nuclear (complete VICE restart)'),
     waitUntilRunningStable: z.boolean().default(false).describe('When action is resume, wait until running becomes stable before returning'),
   }),
   dataSchema: debugStateSchema.extend({

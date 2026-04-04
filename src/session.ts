@@ -774,7 +774,17 @@ export class ViceSession {
       }
       this.#syncMonitorRuntimeState();
       if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
-        void this.#scheduleRecovery();
+        void this.#scheduleRecovery().catch((error) => {
+          this.#writeProcessLogLine(`[recovery-error] ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    });
+    this.#client.on('transport-error', (error: Error) => {
+      this.#writeProcessLogLine(`[monitor-error] transport error: ${error.message}`);
+      if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
+        void this.#scheduleRecovery().catch((recoveryError) => {
+          this.#writeProcessLogLine(`[recovery-error] ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`);
+        });
       }
     });
     this.#client.on('event', (event) => {
@@ -886,7 +896,7 @@ export class ViceSession {
   async execute(
     action: 'pause' | 'resume' | 'step' | 'step_over' | 'step_out' | 'reset',
     count = 1,
-    resetMode: 'soft' | 'hard' = 'soft',
+    resetMode: 'soft' | 'hard' | 'nuclear' = 'soft',
     waitUntilRunningStable = false,
   ) {
     switch (action) {
@@ -1153,9 +1163,18 @@ export class ViceSession {
     };
   }
 
-  async resetMachine(mode: 'soft' | 'hard') {
+  async resetMachine(mode: 'soft' | 'hard' | 'nuclear') {
     return this.#withExecutionLock(async () => {
       await this.#ensureReady();
+
+      // CRITICAL: Clear held input state before ANY reset
+      this.#clearHeldInputState();
+
+      // Handle nuclear reset with full process restart
+      if (mode === 'nuclear') {
+        return await this.#performNuclearReset();
+      }
+
       // Save pause intent before reset
       const wasPaused = this.#explicitPauseActive;
       this.#lastExecutionIntent = 'reset';
@@ -1182,6 +1201,90 @@ export class ViceSession {
         warnings: [] as WarningItem[],
       };
     });
+  }
+
+  async #performNuclearReset() {
+    // Save breakpoint state for restoration
+    const savedBreakpoints = await this.#captureBreakpointState();
+    const wasPaused = this.#explicitPauseActive;
+
+    this.#writeProcessLogLine('[nuclear-reset] initiating full VICE process restart');
+
+    // Schedule full restart (reuses existing recovery infrastructure)
+    await this.#scheduleRecovery();
+
+    // Restore breakpoints after restart
+    await this.#restoreBreakpointState(savedBreakpoints);
+
+    // Restore pause intent
+    this.#explicitPauseActive = wasPaused;
+    if (wasPaused) {
+      this.#writeProcessLogLine('[nuclear-reset] restoring paused state');
+      await this.pauseExecution();
+    }
+
+    this.#writeProcessLogLine('[nuclear-reset] completed successfully');
+
+    const debugState = await this.#readDebugState();
+    return {
+      executionState: debugState.executionState,
+      lastStopReason: debugState.lastStopReason,
+      programCounter: debugState.programCounter,
+      registers: debugState.registers,
+      warnings: [] as WarningItem[],
+    };
+  }
+
+  async #captureBreakpointState() {
+    try {
+      const result = await this.listBreakpoints(true);
+      return result.breakpoints.map(bp => ({
+        kind: bp.kind,
+        start: bp.start,
+        end: bp.end,
+        enabled: bp.enabled,
+        temporary: bp.temporary,
+        hasCondition: bp.hasCondition,
+        label: this.#breakpointLabels.get(bp.id) ?? null,
+      }));
+    } catch (error) {
+      this.#writeProcessLogLine(`[nuclear-reset] failed to capture breakpoints: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
+
+  async #restoreBreakpointState(savedBreakpoints: Array<{
+    kind: BreakpointKind;
+    start: number;
+    end: number;
+    enabled: boolean;
+    temporary: boolean;
+    hasCondition: boolean;
+    label: string | null;
+  }>) {
+    if (savedBreakpoints.length === 0) {
+      return;
+    }
+
+    this.#writeProcessLogLine(`[nuclear-reset] restoring ${savedBreakpoints.length} breakpoints`);
+
+    for (const bp of savedBreakpoints) {
+      try {
+        await this.breakpointSet({
+          kind: bp.kind,
+          address: bp.start,
+          length: bp.end - bp.start + 1,
+          enabled: bp.enabled,
+          temporary: bp.temporary,
+          label: bp.label ?? undefined,
+        });
+        this.#writeProcessLogLine(`[nuclear-reset] restored breakpoint at $${bp.start.toString(16).toUpperCase()}`);
+      } catch (error) {
+        this.#writeProcessLogLine(
+          `[nuclear-reset] failed to restore breakpoint at $${bp.start.toString(16).toUpperCase()}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
   }
 
   async listBreakpoints(includeDisabled = true) {
@@ -2033,7 +2136,9 @@ export class ViceSession {
       ];
 
       if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
-        void this.#scheduleRecovery();
+        void this.#scheduleRecovery().catch((error) => {
+          this.#writeProcessLogLine(`[recovery-error] ${error instanceof Error ? error.message : String(error)}`);
+        });
       }
     });
 
@@ -2049,13 +2154,18 @@ export class ViceSession {
       this.#warnings = [...this.#warnings.filter((warning) => warning.code !== 'process_error'), makeWarning(error.message, 'process_error')];
 
       if (!this.#suppressRecovery && !this.#shuttingDown && this.#config) {
-        void this.#scheduleRecovery();
+        void this.#scheduleRecovery().catch((error) => {
+          this.#writeProcessLogLine(`[recovery-error] ${error instanceof Error ? error.message : String(error)}`);
+        });
       }
     });
   }
 
   #attachProcessLogging(child: ChildProcess, binary: string, args: string[]): void {
     const logStream = createWriteStream(VICE_PROCESS_LOG_PATH, { flags: 'a' });
+    logStream.on('error', () => {
+      // Suppress log stream errors - logging is non-critical
+    });
     this.#processLogStream = logStream;
     this.#stdoutMirrorBuffer = '';
     this.#stderrMirrorBuffer = '';
@@ -2088,7 +2198,12 @@ export class ViceSession {
     this.#flushViceOutputMirror('stdout');
     this.#flushViceOutputMirror('stderr');
     logStream.write(`\n=== Emulator stream closed ${nowIso()} (${reason}) ===\n`);
-    logStream.end();
+    logStream.end(() => {
+      // Stream closed successfully
+    });
+    logStream.on('error', () => {
+      // Suppress stream close errors during process termination
+    });
     this.#processLogStream = null;
   }
 

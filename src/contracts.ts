@@ -36,7 +36,7 @@ export const stopReasonSchema = z.enum([
 ]);
 export const sessionHealthSchema = z.enum(['not_configured', 'starting', 'ready', 'recovering', 'stopped', 'error']);
 export const breakpointKindSchema = z.enum(['exec', 'read', 'write', 'read_write']);
-export const resetModeSchema = z.enum(['soft', 'hard']);
+export const resetModeSchema = z.enum(['soft', 'hard', 'nuclear']);
 export const inputActionSchema = z.enum(['press', 'release', 'tap']);
 export const joystickControlSchema = z.enum(['up', 'down', 'left', 'right', 'fire']);
 export const joystickPortSchema = z.union([z.literal(1), z.literal(2)]);
