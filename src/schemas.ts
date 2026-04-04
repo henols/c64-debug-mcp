@@ -28,17 +28,6 @@ export const warningSchema = warningItemSchema;
  * @throws ZodError if format is invalid or out of range
  */
 function parseAddress16(input: unknown): number {
-  // Handle undefined (used in union contexts where field may not exist)
-  if (input === undefined) {
-    throw new z.ZodError([
-      {
-        code: 'custom',
-        message: 'Address is required',
-        path: [],
-      },
-    ]);
-  }
-
   // If already a number, validate and return
   if (typeof input === 'number') {
     if (!Number.isInteger(input) || input < 0 || input > 0xffff) {
@@ -133,17 +122,6 @@ export const address16Schema = z
  * @throws ZodError if format is invalid or out of range
  */
 function parseByte(input: unknown): number {
-  // Handle undefined (used in union contexts where field may not exist)
-  if (input === undefined) {
-    throw new z.ZodError([
-      {
-        code: 'custom',
-        message: 'Byte value is required',
-        path: [],
-      },
-    ]);
-  }
-
   // If already a number, validate and return
   if (typeof input === 'number') {
     if (!Number.isInteger(input) || input < 0 || input > 0xff) {
