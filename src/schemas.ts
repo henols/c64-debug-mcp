@@ -103,7 +103,6 @@ function parseAddress16(input: unknown): number {
   return parsed;
 }
 
-// BACK TO 1.0.7: preprocess was working fine!
 export const address16Schema = z
   .preprocess(parseAddress16, z.number().int().min(0).max(0xffff))
   .describe('16-bit C64 address: decimal (53248) or hex string with prefix ($D000, 0xD000)');
@@ -262,7 +261,6 @@ function parseByte(input: unknown): number {
   ]);
 }
 
-// BACK TO 1.0.7: preprocess was working fine!
 export const byteValueSchema = z
   .preprocess(parseByte, z.number().int().min(0).max(0xff))
   .describe('8-bit byte value: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111)');

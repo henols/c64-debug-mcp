@@ -137,42 +137,36 @@ const setRegistersTool = createViceTool({
 
 const readMemoryTool = createViceTool({
   id: 'memory_read',
-  description: 'Reads a memory chunk. Use either (address, length) or (start, end) format. Addresses can be decimal (53248) or hex string with prefix ($D000, 0xD000). Returns byte values as decimal numbers.',
-  inputSchema: z.union([
-    z.object({
-      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      length: z.number().int().positive().max(0xFFFF).describe('Number of bytes to read'),
-    }).refine((input) => input.address + input.length <= 0x10000, {
-      message: 'address + length must stay within the 64K address space',
-      path: ['length'],
-    }),
-    z.object({
-      start: address16Schema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      end: address16Schema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-    }).refine((input) => input.start <= input.end, {
-      message: 'End address must be greater than or equal to start address',
-      path: ['end'],
-    }).refine((input) => input.end < 0x10000, {
-      message: 'End address must stay within the 64K address space',
-      path: ['end'],
-    }),
-  ]),
+  description: 'Reads a memory chunk. Specify start_address and either data_length or end_address. Address can be decimal (53248) or hex string with prefix ($D000, 0xD000). Returns byte values as decimal numbers.',
+  inputSchema: z.object({
+    start_address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+    data_length: z.number().int().positive().max(0xFFFF).optional().describe('Number of bytes to read (use either data_length or end_address)'),
+    end_address: address16Schema.optional().describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000). Use either data_length or end_address.'),
+  }),
   dataSchema: z.object({
-    address: z.number().int().min(0).max(0xffff).describe('Start address of the returned memory chunk'),
+    address: address16Schema.describe('Start address of the returned memory chunk'),
     length: z.number().int().min(0).describe('Number of bytes returned'),
     data: byteArraySchema.describe('Raw bytes returned from memory'),
   }),
   execute: async (input) => {
-    // Normalize start/end to address/length (preprocessing already converted strings to numbers)
-    let address: number;
+    const address = input.start_address;
     let length: number;
 
-    if ('start' in input && 'end' in input) {
-      address = input.start;
-      length = input.end - input.start + 1;
+    if (input.end_address !== undefined) {
+      if (address > input.end_address) {
+        throw new Error('End address must be greater than or equal to start address');
+      }
+      if (input.end_address >= 0x10000) {
+        throw new Error('End address must stay within the 64K address space');
+      }
+      length = input.end_address - address + 1;
+    } else if (input.data_length !== undefined) {
+      length = input.data_length;
+      if (address + length > 0x10000) {
+        throw new Error('address + length must stay within the 64K address space');
+      }
     } else {
-      address = input.address;
-      length = input.length;
+      throw new Error('Must provide either data_length or end_address');
     }
 
     const result = await c64Session.readMemory(address, address + length - 1);
@@ -198,7 +192,7 @@ const writeMemoryTool = createViceTool({
     }),
   dataSchema: z.object({
     worked: z.boolean().describe('Whether the write operation completed successfully'),
-    address: z.number().int().min(0).max(0xffff).describe('Start address where the bytes were written'),
+    address: address16Schema.describe('Start address where the bytes were written'),
     length: z.number().int().min(1).describe('Number of bytes written'),
   }).extend(debugStateSchema.shape),
   execute: async (input) => await c64Session.writeMemory(input.address, input.data),
@@ -251,50 +245,46 @@ const listBreakpointsTool = createViceTool({
 
 const breakpointSetTool = createViceTool({
   id: 'breakpoint_set',
-  description: 'Creates an execution breakpoint or read/write watchpoint. Use either (address, length) or (start, end) format. Addresses can be decimal (53248) or hex string with prefix ($D000, 0xD000).',
-  inputSchema: z.union([
-    z.object({
-      kind: breakpointKindSchema,
-      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes'),
-      condition: z.string().optional(),
-      label: z.string().optional(),
-      temporary: z.boolean().default(false),
-      enabled: z.boolean().default(true),
-    }),
-    z.object({
-      kind: breakpointKindSchema,
-      start: address16Schema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      end: address16Schema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      condition: z.string().optional(),
-      label: z.string().optional(),
-      temporary: z.boolean().default(false),
-      enabled: z.boolean().default(true),
-    }).refine((input) => input.start <= input.end, {
-      message: 'End address must be greater than or equal to start address',
-      path: ['end'],
-    }),
-  ]),
+  description: 'Creates an execution breakpoint or read/write watchpoint. Specify start_address and either data_length or end_address. Address can be decimal (53248) or hex string with prefix ($D000, 0xD000).',
+  inputSchema: z.object({
+    kind: breakpointKindSchema,
+    start_address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+    data_length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes (use either data_length or end_address)'),
+    end_address: address16Schema.optional().describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000). Use either data_length or end_address.'),
+    condition: z.string().optional(),
+    label: z.string().optional(),
+    temporary: z.boolean().default(false),
+    enabled: z.boolean().default(true),
+  }),
   dataSchema: z.object({
     breakpoint: breakpointSchema,
     executionState: executionStateSchema,
     lastStopReason: stopReasonSchema,
-    programCounter: z.number().int().min(0).max(0xffff).nullable(),
+    programCounter: address16Schema.nullable(),
     registers: c64PartialRegisterValueSchema.nullable(),
   }),
   execute: async (input) => {
-    // Normalize start/end to address/length (preprocessing already converted strings to numbers)
-    const normalizedInput = 'start' in input && 'end' in input
-      ? {
-          kind: input.kind,
-          address: input.start,
-          length: input.end - input.start + 1,
-          condition: input.condition,
-          label: input.label,
-          temporary: input.temporary,
-          enabled: input.enabled,
-        }
-      : input;
+    const address = input.start_address;
+    let length: number;
+
+    if (input.end_address !== undefined) {
+      if (address > input.end_address) {
+        throw new Error('End address must be greater than or equal to start address');
+      }
+      length = input.end_address - address + 1;
+    } else {
+      length = input.data_length; // defaults to 1
+    }
+
+    const normalizedInput = {
+      kind: input.kind,
+      address,
+      length,
+      condition: input.condition,
+      label: input.label,
+      temporary: input.temporary,
+      enabled: input.enabled,
+    };
 
     const result = await c64Session.breakpointSet(normalizedInput);
     return {
