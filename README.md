@@ -26,6 +26,25 @@ The MCP server accepts C64 addresses in multiple formats for natural interaction
 
 **Note**: Bare hex without prefix (e.g., `D000`) is NOT supported to avoid ambiguity with 4-digit decimals.
 
+### Range Support
+
+Tools that read memory or set breakpoints support both **address+length** and **start+end** formats:
+
+**Address + Length format** (original):
+```javascript
+memory_read(address="$D000", length=256)      // Read 256 bytes starting at $D000
+breakpoint_set(kind="exec", address="$1000", length=1)  // Breakpoint at $1000
+```
+
+**Start + End format** (more intuitive for ranges):
+```javascript
+memory_read(start="$D000", end="$D0FF")       // Read from $D000 to $D0FF inclusive
+memory_read(start=198, end=199)                // Read addresses 198-199 (2 bytes)
+breakpoint_set(kind="exec", start="$1000", end="$1000")  // Breakpoint at $1000
+```
+
+Both formats work with all address representations (decimal, $, 0x).
+
 **Common C64 Addresses**:
 - `$D000` - SID chip registers (sound)
 - `$D020` - Border color register
@@ -33,6 +52,24 @@ The MCP server accepts C64 addresses in multiple formats for natural interaction
 - `$0400` - Default screen memory
 - `$0800` - Common program start
 - `$C000` - BASIC ROM start
+
+## Address Ranges
+
+For operations that work with memory ranges (like `memory_read` and `breakpoint_set`), you can specify ranges in two ways:
+
+**Option 1: Address + Length**
+```javascript
+memory_read(address="$0400", length=256)  // Read 256 bytes from $0400
+breakpoint_set(kind="exec", address="$1000", length=16)  // Break on $1000-$100F
+```
+
+**Option 2: Start + End (inclusive)**
+```javascript
+memory_read(start="$0400", end="$04FF")  // Read from $0400 to $04FF (256 bytes)
+breakpoint_set(kind="exec", start="$1000", end="$100F")  // Break on $1000-$100F
+```
+
+Both formats work identically and support all address formats (decimal, hex).
 
 ## Byte Value Formats
 
