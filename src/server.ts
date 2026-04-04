@@ -30,6 +30,8 @@ import {
   toolOutputSchema,
   waitForStateResultSchema,
   warningSchema,
+  parseAddress16,
+  parseByte,
 } from './schemas.js';
 import { ViceSession } from './session.js';
 
@@ -154,18 +156,20 @@ const readMemoryTool = createViceTool({
     data: byteArraySchema.describe('Raw bytes returned from memory'),
   }),
   execute: async (input) => {
-    // Normalize start/end to address/length
+    // Normalize start/end to address/length and parse addresses
     let address: number;
     let length: number;
 
     if ('start' in input && 'end' in input) {
-      if (input.end < input.start) {
+      const start = parseAddress16(input.start);
+      const end = parseAddress16(input.end);
+      if (end < start) {
         throw new Error('End address must be greater than or equal to start address');
       }
-      address = input.start;
-      length = input.end - input.start + 1;
+      address = start;
+      length = end - start + 1;
     } else if ('address' in input && 'length' in input) {
-      address = input.address;
+      address = parseAddress16(input.address);
       length = input.length;
     } else {
       throw new Error('Invalid input: must provide either (address, length) or (start, end)');
@@ -188,21 +192,26 @@ const readMemoryTool = createViceTool({
 const writeMemoryTool = createViceTool({
   id: 'memory_write',
   description: 'Writes raw byte values into C64 memory. Address and byte values support decimal, hex ($FF, 0xFF), and binary (%11111111, 0b11111111) formats. Requires emulator to be stopped.',
-  inputSchema: z
-    .object({
-      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      data: byteArraySchema.min(1).describe('Bytes to write: decimal (255), hex ($FF, 0xFF), or binary (%11111111, 0b11111111). Mixed formats allowed.'),
-    })
-    .refine((input) => input.address + input.data.length - 1 <= 0xffff, {
-      message: 'address + data.length must stay within the 16-bit address space',
-      path: ['data'],
-    }),
+  inputSchema: z.object({
+    address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+    data: byteArraySchema.min(1).describe('Bytes to write: decimal (255), hex ($FF, 0xFF), or binary (%11111111, 0b11111111). Mixed formats allowed.'),
+  }),
   dataSchema: z.object({
     worked: z.boolean().describe('Whether the write operation completed successfully'),
-    address: address16Schema.describe('Start address where the bytes were written'),
+    address: z.number().int().min(0).max(0xffff).describe('Start address where the bytes were written'),
     length: z.number().int().min(1).describe('Number of bytes written'),
   }).extend(debugStateSchema.shape),
-  execute: async (input) => await c64Session.writeMemory(input.address, input.data),
+  execute: async (input) => {
+    const address = parseAddress16(input.address);
+    const data = input.data.map(b => parseByte(b));
+
+    // Validate address space
+    if (address + data.length - 1 > 0xffff) {
+      throw new Error('address + data.length must stay within the 16-bit address space');
+    }
+
+    return await c64Session.writeMemory(address, data);
+  },
 });
 
 const executeTool = createViceTool({
@@ -281,7 +290,7 @@ const breakpointSetTool = createViceTool({
     registers: c64PartialRegisterValueSchema.nullable(),
   }),
   execute: async (input) => {
-    // Normalize start/end to address/length
+    // Normalize start/end to address/length and parse addresses
     let normalizedInput: {
       kind: z.infer<typeof breakpointKindSchema>;
       address: number;
@@ -293,13 +302,15 @@ const breakpointSetTool = createViceTool({
     };
 
     if ('start' in input && 'end' in input) {
-      if (input.end < input.start) {
+      const start = parseAddress16(input.start);
+      const end = parseAddress16(input.end);
+      if (end < start) {
         throw new Error('End address must be greater than or equal to start address');
       }
       normalizedInput = {
         kind: input.kind,
-        address: input.start,
-        length: input.end - input.start + 1,
+        address: start,
+        length: end - start + 1,
         condition: input.condition,
         label: input.label,
         temporary: input.temporary,
@@ -308,7 +319,7 @@ const breakpointSetTool = createViceTool({
     } else if ('address' in input && 'length' in input) {
       normalizedInput = {
         kind: input.kind,
-        address: input.address,
+        address: parseAddress16(input.address),
         length: input.length,
         condition: input.condition,
         label: input.label,

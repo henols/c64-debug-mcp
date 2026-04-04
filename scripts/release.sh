@@ -135,9 +135,7 @@ fi
 echo
 echo -e "${BLUE}Creating release commit and tag...${NC}"
 git add "$PACKAGE_DIR/package.json" "$REPO_ROOT/package-lock.json"
-git commit -m "chore: release v${NEW_VERSION}
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+git commit -m "chore: release v${NEW_VERSION}"
 
 git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
 
