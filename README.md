@@ -24,7 +24,7 @@ Debug Commodore 64 programs through conversation - AI-powered control of the VIC
 ## Installation
 
 ```bash
-claude mcp add c64debug -- npx -y c64-debug-mcp
+claude mcp add c64-dev-tools -- npx -y c64-debug-mcp@latest
 ```
 
 Or add manually to your MCP client config:
@@ -32,9 +32,9 @@ Or add manually to your MCP client config:
 ```json
 {
   "mcpServers": {
-    "c64debug": {
+    "c64-dev-tools": {
       "command": "npx",
-      "args": ["-y", "c64-debug-mcp"]
+      "args": ["-y", "c64-debug-mcp@latest"]
     }
   }
 }
