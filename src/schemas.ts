@@ -106,9 +106,14 @@ function parseAddress16(input: unknown): number {
 // Parse address - exported for use in execute functions
 export { parseAddress16 };
 
-// MCP-compatible schema: union accepts both formats, parsing happens in execute
-export const address16Schema = z
+// Input schema: accepts both number and string for MCP compatibility
+export const address16InputSchema = z
   .union([z.number().int().min(0).max(0xffff), z.string()])
+  .describe('16-bit C64 address: decimal (53248) or hex string with prefix ($D000, 0xD000)');
+
+// Output schema: always returns a number
+export const address16Schema = z
+  .number().int().min(0).max(0xffff)
   .describe('16-bit C64 address: decimal (53248) or hex string with prefix ($D000, 0xD000)');
 
 /**
@@ -268,14 +273,25 @@ function parseByte(input: unknown): number {
 // Parse byte - exported for use in execute functions
 export { parseByte };
 
-// MCP-compatible schema: union accepts both formats, parsing happens in execute
-export const byteValueSchema = z
+// Input schema: accepts both number and string for MCP compatibility
+export const byteValueInputSchema = z
   .union([z.number().int().min(0).max(0xff), z.string()])
   .describe('8-bit byte value: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111)');
 
+// Output schema: always returns a number
+export const byteValueSchema = z
+  .number().int().min(0).max(0xff)
+  .describe('8-bit byte value: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111)');
+
+// Input array schema
+export const byteArrayInputSchema = z
+  .array(byteValueInputSchema)
+  .describe('Array of byte values in mixed formats: [255, "$FF", "%11111111", 42]');
+
+// Output array schema
 export const byteArraySchema = z
   .array(byteValueSchema)
-  .describe('Array of byte values in mixed formats: [255, "$FF", "%11111111", 42]');
+  .describe('Array of byte values');
 
 export const c64RegisterValueSchema = z.object(
   Object.fromEntries(

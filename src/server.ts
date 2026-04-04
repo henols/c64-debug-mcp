@@ -14,8 +14,10 @@ import {
 import { normalizeToolError } from './errors.js';
 import {
   address16Schema,
+  address16InputSchema,
   breakpointSchema,
   byteArraySchema,
+  byteArrayInputSchema,
   c64RegisterValueSchema,
   c64PartialRegisterValueSchema,
   debugStateSchema,
@@ -142,12 +144,12 @@ const readMemoryTool = createViceTool({
   description: 'Reads a memory chunk. Use either (address, length) or (start, end) format. Addresses can be decimal (53248) or hex string with prefix ($D000, 0xD000). Returns byte values as decimal numbers.',
   inputSchema: z.union([
     z.object({
-      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      address: address16InputSchema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
       length: z.number().int().positive().max(0xFFFF).describe('Number of bytes to read'),
     }),
     z.object({
-      start: address16Schema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      end: address16Schema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      start: address16InputSchema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      end: address16InputSchema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
     }),
   ]),
   dataSchema: z.object({
@@ -193,8 +195,8 @@ const writeMemoryTool = createViceTool({
   id: 'memory_write',
   description: 'Writes raw byte values into C64 memory. Address and byte values support decimal, hex ($FF, 0xFF), and binary (%11111111, 0b11111111) formats. Requires emulator to be stopped.',
   inputSchema: z.object({
-    address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-    data: byteArraySchema.min(1).describe('Bytes to write: decimal (255), hex ($FF, 0xFF), or binary (%11111111, 0b11111111). Mixed formats allowed.'),
+    address: address16InputSchema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+    data: byteArrayInputSchema.min(1).describe('Bytes to write: decimal (255), hex ($FF, 0xFF), or binary (%11111111, 0b11111111). Mixed formats allowed.'),
   }),
   dataSchema: z.object({
     worked: z.boolean().describe('Whether the write operation completed successfully'),
@@ -265,7 +267,7 @@ const breakpointSetTool = createViceTool({
   inputSchema: z.union([
     z.object({
       kind: breakpointKindSchema,
-      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      address: address16InputSchema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
       length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes'),
       condition: z.string().optional(),
       label: z.string().optional(),
@@ -274,8 +276,8 @@ const breakpointSetTool = createViceTool({
     }),
     z.object({
       kind: breakpointKindSchema,
-      start: address16Schema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      end: address16Schema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      start: address16InputSchema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      end: address16InputSchema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
       condition: z.string().optional(),
       label: z.string().optional(),
       temporary: z.boolean().default(false),
