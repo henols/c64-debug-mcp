@@ -103,17 +103,9 @@ function parseAddress16(input: unknown): number {
   return parsed;
 }
 
-// Parse address - exported for use in execute functions
-export { parseAddress16 };
-
-// Input schema: accepts both number and string for MCP compatibility
-export const address16InputSchema = z
-  .union([z.number().int().min(0).max(0xffff), z.string()])
-  .describe('16-bit C64 address: decimal (53248) or hex string with prefix ($D000, 0xD000)');
-
-// Output schema: always returns a number
+// BACK TO 1.0.7: preprocess was working fine!
 export const address16Schema = z
-  .number().int().min(0).max(0xffff)
+  .preprocess(parseAddress16, z.number().int().min(0).max(0xffff))
   .describe('16-bit C64 address: decimal (53248) or hex string with prefix ($D000, 0xD000)');
 
 /**
@@ -270,28 +262,14 @@ function parseByte(input: unknown): number {
   ]);
 }
 
-// Parse byte - exported for use in execute functions
-export { parseByte };
-
-// Input schema: accepts both number and string for MCP compatibility
-export const byteValueInputSchema = z
-  .union([z.number().int().min(0).max(0xff), z.string()])
-  .describe('8-bit byte value: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111)');
-
-// Output schema: always returns a number
+// BACK TO 1.0.7: preprocess was working fine!
 export const byteValueSchema = z
-  .number().int().min(0).max(0xff)
+  .preprocess(parseByte, z.number().int().min(0).max(0xff))
   .describe('8-bit byte value: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111)');
 
-// Input array schema
-export const byteArrayInputSchema = z
-  .array(byteValueInputSchema)
-  .describe('Array of byte values in mixed formats: [255, "$FF", "%11111111", 42]');
-
-// Output array schema
 export const byteArraySchema = z
   .array(byteValueSchema)
-  .describe('Array of byte values');
+  .describe('Array of byte values in mixed formats: [255, "$FF", "%11111111", 42]');
 
 export const c64RegisterValueSchema = z.object(
   Object.fromEntries(
