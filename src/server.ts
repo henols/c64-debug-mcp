@@ -137,11 +137,30 @@ const setRegistersTool = createViceTool({
 
 const readMemoryTool = createViceTool({
   id: 'memory_read',
-  description: 'Reads a memory chunk by start address and length. Address can be decimal (53248) or hex string with prefix ($D000, 0xD000). Returns byte values as decimal numbers.',
+  description: 'Reads a memory chunk. Use either (address, length) or (start, end) format. Addresses can be decimal (53248) or hex string with prefix ($D000, 0xD000). Returns byte values as decimal numbers.',
   inputSchema: z
-    .object({
-      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-      length: z.number().int().positive().max(0xFFFF).describe('Size of the data chunk to read in bytes'),
+    .union([
+      z.object({
+        address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+        length: z.number().int().positive().max(0xFFFF).describe('Number of bytes to read'),
+      }),
+      z.object({
+        start: address16Schema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+        end: address16Schema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      }),
+    ])
+    .transform((input) => {
+      // Normalize start/end to address/length
+      if ('start' in input && 'end' in input) {
+        if (input.end < input.start) {
+          throw new Error('End address must be greater than or equal to start address');
+        }
+        return {
+          address: input.start,
+          length: input.end - input.start + 1,
+        };
+      }
+      return input as { address: number; length: number };
     })
     .refine((input) => input.address + input.length <= 0x10000, {
       message: 'address + length must stay within the 64K address space',
@@ -229,16 +248,41 @@ const listBreakpointsTool = createViceTool({
 
 const breakpointSetTool = createViceTool({
   id: 'breakpoint_set',
-  description: 'Creates an execution breakpoint or read/write watchpoint. Address can be decimal (53248) or hex string with prefix ($D000, 0xD000).',
-  inputSchema: z.object({
-    kind: breakpointKindSchema,
-    address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
-    length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes'),
-    condition: z.string().optional(),
-    label: z.string().optional(),
-    temporary: z.boolean().default(false),
-    enabled: z.boolean().default(true),
-  }),
+  description: 'Creates an execution breakpoint or read/write watchpoint. Use either (address, length) or (start, end) format. Addresses can be decimal (53248) or hex string with prefix ($D000, 0xD000).',
+  inputSchema: z
+    .object({
+      kind: breakpointKindSchema,
+      condition: z.string().optional(),
+      label: z.string().optional(),
+      temporary: z.boolean().default(false),
+      enabled: z.boolean().default(true),
+    })
+    .and(
+      z.union([
+        z.object({
+          address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+          length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes'),
+        }),
+        z.object({
+          start: address16Schema.describe('Start address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+          end: address16Schema.describe('End address (inclusive): decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+        }),
+      ]),
+    )
+    .transform((input) => {
+      // Normalize start/end to address/length
+      if ('start' in input && 'end' in input) {
+        if (input.end < input.start) {
+          throw new Error('End address must be greater than or equal to start address');
+        }
+        return {
+          ...input,
+          address: input.start,
+          length: input.end - input.start + 1,
+        };
+      }
+      return input as typeof input & { address: number; length: number };
+    }),
   dataSchema: z.object({
     breakpoint: breakpointSchema,
     executionState: executionStateSchema,
