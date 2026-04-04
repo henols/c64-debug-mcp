@@ -137,10 +137,10 @@ const setRegistersTool = createViceTool({
 
 const readMemoryTool = createViceTool({
   id: 'memory_read',
-  description: 'Reads a memory chunk by start address and length and returns raw bytes as a JSON array.',
+  description: 'Reads a memory chunk by start address and length. Address can be decimal (53248) or hex string with prefix ($D000, 0xD000). Returns byte values as decimal numbers.',
   inputSchema: z
     .object({
-      address: address16Schema.describe('Start address in the 16-bit C64 address space'),
+      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
       length: z.number().int().positive().max(0xFFFF).describe('Size of the data chunk to read in bytes'),
     })
     .refine((input) => input.address + input.length <= 0x10000, {
@@ -164,11 +164,11 @@ const readMemoryTool = createViceTool({
 
 const writeMemoryTool = createViceTool({
   id: 'memory_write',
-  description: 'Writes raw byte values into the active C64 memory space. Requires emulator to be stopped - call execute(action="pause") first if running.',
+  description: 'Writes raw byte values into C64 memory. Address and byte values support decimal, hex ($FF, 0xFF), and binary (%11111111, 0b11111111) formats. Requires emulator to be stopped.',
   inputSchema: z
     .object({
-      address: address16Schema.describe('Start address in the 16-bit C64 address space'),
-      data: byteArraySchema.min(1).describe('Raw bytes to write into memory'),
+      address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
+      data: byteArraySchema.min(1).describe('Bytes to write: decimal (255), hex ($FF, 0xFF), or binary (%11111111, 0b11111111). Mixed formats allowed.'),
     })
     .refine((input) => input.address + input.data.length - 1 <= 0xffff, {
       message: 'address + data.length must stay within the 16-bit address space',
@@ -229,10 +229,10 @@ const listBreakpointsTool = createViceTool({
 
 const breakpointSetTool = createViceTool({
   id: 'breakpoint_set',
-  description: 'Creates an execution breakpoint or read/write watchpoint.',
+  description: 'Creates an execution breakpoint or read/write watchpoint. Address can be decimal (53248) or hex string with prefix ($D000, 0xD000).',
   inputSchema: z.object({
     kind: breakpointKindSchema,
-    address: address16Schema.describe('Start address of the breakpoint range'),
+    address: address16Schema.describe('Start address: decimal (53248) or hex string with prefix ($D000, 0xD000)'),
     length: z.number().int().positive().default(1).describe('Size of the breakpoint range in bytes'),
     condition: z.string().optional(),
     label: z.string().optional(),

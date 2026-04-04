@@ -14,6 +14,64 @@ Debug Commodore 64 programs through conversation - AI-powered control of the VIC
 - 📸 **Display Capture**: Capture screen state and text content
 - ⌨️ **Input Control**: Send keyboard and joystick input
 - 📝 **Program Loading**: Load PRG files and manage execution
+- 🔢 **Flexible Formats**: Use C64 notation ($D000, $FF, %11111111) or standard formats (0xD000, 255, 0b11111111)
+
+## Address Formats
+
+The MCP server accepts C64 addresses in multiple formats for natural interaction:
+
+- **C64 style**: `$D000` (dollar sign prefix - classic 6502 assembler notation)
+- **C style**: `0xD000` (0x prefix - standard programming hex notation)
+- **Decimal**: `53248` (traditional decimal format)
+
+**Note**: Bare hex without prefix (e.g., `D000`) is NOT supported to avoid ambiguity with 4-digit decimals.
+
+**Common C64 Addresses**:
+- `$D000` - SID chip registers (sound)
+- `$D020` - Border color register
+- `$D021` - Background color register
+- `$0400` - Default screen memory
+- `$0800` - Common program start
+- `$C000` - BASIC ROM start
+
+## Byte Value Formats
+
+The MCP server accepts byte values (0-255) in multiple formats for natural C64-style input:
+
+- **C64 hex**: `$FF` (dollar sign prefix - classic 6502 notation)
+- **C hex**: `0xFF` (0x prefix - standard programming notation)
+- **C64 binary**: `%11111111` (percent prefix - classic 6502 bit notation)
+- **C binary**: `0b11111111` (0b prefix - standard programming notation)
+- **Decimal**: `255` (traditional decimal format)
+
+**Note**: Bare hex/binary without prefix (e.g., `FF`, `11111111`) is NOT supported to avoid ambiguity.
+
+**Mixed formats in arrays**:
+```json
+[255, "$FF", "0xFF", "%11111111", "0b11111111"]
+```
+
+**Common C64 Byte Values**:
+- `$00`-`$0F` - Color values (0-15)
+- `$20` - PETSCII space character
+- `$41` - PETSCII 'A' character
+- `%00011011` - VIC-II D011 control register (text mode, 25 rows, screen on)
+- `%11111111` - All bits set (enable all sprites, etc.)
+
+**Use Cases**:
+```javascript
+// Set border to light blue
+memory_write(address="$D020", data=["$0E"])
+
+// Enable all 8 sprites
+memory_write(address="$D015", data=["%11111111"])
+
+// Write " AB" to screen (PETSCII)
+memory_write(address="$0400", data=["$20", "$41", "$42"])
+
+// Set VIC-II control register with bit pattern
+memory_write(address="$D011", data=["%00011011"])
+```
 
 ## Requirements
 

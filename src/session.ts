@@ -1811,11 +1811,25 @@ export class ViceSession {
     await this.#ensureReady();
     this.#syncMonitorRuntimeState();
 
+    // Only allow input when execution state is known (running or stopped)
+    if (this.#executionState === 'unknown') {
+      throw new ViceMcpError(
+        'emulator_state_unknown',
+        `${commandName} requires a known execution state (running or stopped)`,
+        'session_state',
+        false,
+        {
+          executionState: this.#executionState,
+          lastStopReason: this.#lastStopReason,
+        },
+      );
+    }
+
     const wasRunning = this.#executionState === 'running';
     const wasPaused = this.#explicitPauseActive;
 
-    // If not running, temporarily resume
-    if (!wasRunning) {
+    // If stopped, temporarily resume
+    if (this.#executionState === 'stopped') {
       this.#writeProcessLogLine(`[${commandName}] auto-resuming for input operation`);
       await this.#client.continueExecution();
       await this.waitForState('running', 5000, INPUT_RUNNING_STABLE_MS);

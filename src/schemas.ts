@@ -15,11 +15,259 @@ import {
 
 export const warningSchema = warningItemSchema;
 
-export const address16Schema = z.number().int().min(0).max(0xffff);
+/**
+ * Parses a C64 memory address from multiple formats:
+ * - Decimal number: 53248
+ * - Hex string with $: "$D000"
+ * - Hex string with 0x: "0xD000" or "0XD000"
+ *
+ * Bare hex without prefix is NOT supported to avoid ambiguity with 4-digit decimals.
+ *
+ * @param input - Address as number or string
+ * @returns Parsed decimal number (0-65535)
+ * @throws ZodError if format is invalid or out of range
+ */
+function parseAddress16(input: unknown): number {
+  // If already a number, validate and return
+  if (typeof input === 'number') {
+    if (!Number.isInteger(input) || input < 0 || input > 0xffff) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Address must be an integer between 0 and 65535 (0xFFFF), got ${input}`,
+          path: [],
+        },
+      ]);
+    }
+    return input;
+  }
 
-export const byteValueSchema = z.number().int().min(0).max(0xff).describe('Single raw byte value');
+  // Must be a string for hex parsing
+  if (typeof input !== 'string') {
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        message: `Address must be a number or string, got ${typeof input}`,
+        path: [],
+      },
+    ]);
+  }
 
-export const byteArraySchema = z.array(byteValueSchema).describe('Raw bytes as a JSON array');
+  const trimmed = input.trim();
+
+  // Try to parse as hex with required prefix
+  let hexString: string;
+  let format: string;
+
+  if (trimmed.startsWith('$')) {
+    // C64/6502 style: $D000
+    hexString = trimmed.slice(1);
+    format = 'C64 hex ($)';
+  } else if (trimmed.toLowerCase().startsWith('0x')) {
+    // C-style: 0xD000
+    hexString = trimmed.slice(2);
+    format = 'C hex (0x)';
+  } else {
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        message: `Invalid address format: "${input}". Expected formats: decimal number (53248), hex with $ ($D000), or hex with 0x (0xD000). Bare hex not supported to avoid ambiguity.`,
+        path: [],
+      },
+    ]);
+  }
+
+  // Validate hex string format
+  if (!/^[0-9A-Fa-f]{1,4}$/.test(hexString)) {
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        message: `Invalid ${format} address: "${input}". Hex portion must be 1-4 hex digits (0-9, A-F)`,
+        path: [],
+      },
+    ]);
+  }
+
+  const parsed = parseInt(hexString, 16);
+
+  if (isNaN(parsed) || parsed < 0 || parsed > 0xffff) {
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        message: `Address out of range: "${input}" (${parsed}). Must be 0x0000-0xFFFF (0-65535)`,
+        path: [],
+      },
+    ]);
+  }
+
+  return parsed;
+}
+
+export const address16Schema = z
+  .preprocess(parseAddress16, z.number().int().min(0).max(0xffff))
+  .describe('16-bit C64 address: decimal (53248) or hex string with prefix ($D000, 0xD000)');
+
+/**
+ * Parses a C64 byte value (0-255) from multiple formats:
+ * - Decimal number: 255
+ * - Hex string with $: "$FF"
+ * - Hex string with 0x: "0xFF" or "0XFF"
+ * - Binary string with %: "%11111111"
+ * - Binary string with 0b: "0b11111111" or "0B11111111"
+ *
+ * Bare hex/binary without prefix is NOT supported to avoid ambiguity.
+ *
+ * @param input - Byte value as number or string
+ * @returns Parsed decimal number (0-255)
+ * @throws ZodError if format is invalid or out of range
+ */
+function parseByte(input: unknown): number {
+  // If already a number, validate and return
+  if (typeof input === 'number') {
+    if (!Number.isInteger(input) || input < 0 || input > 0xff) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Byte value must be an integer between 0 and 255 (0xFF), got ${input}`,
+          path: [],
+        },
+      ]);
+    }
+    return input;
+  }
+
+  // Must be a string for hex/binary parsing
+  if (typeof input !== 'string') {
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        message: `Byte value must be a number or string, got ${typeof input}`,
+        path: [],
+      },
+    ]);
+  }
+
+  const trimmed = input.trim();
+
+  // Try hex parsing first
+  if (trimmed.startsWith('$')) {
+    // C64 style: $FF
+    const hexString = trimmed.slice(1);
+    if (!/^[0-9A-Fa-f]{1,2}$/.test(hexString)) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Invalid C64 hex ($) byte value: "${input}". Hex portion must be 1-2 hex digits (0-9, A-F)`,
+          path: [],
+        },
+      ]);
+    }
+    const parsed = parseInt(hexString, 16);
+    if (isNaN(parsed) || parsed < 0 || parsed > 0xff) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Byte value out of range: "${input}" (${parsed}). Must be 0x00-0xFF (0-255)`,
+          path: [],
+        },
+      ]);
+    }
+    return parsed;
+  }
+
+  if (trimmed.toLowerCase().startsWith('0x')) {
+    // C-style hex: 0xFF
+    const hexString = trimmed.slice(2);
+    if (!/^[0-9A-Fa-f]{1,2}$/.test(hexString)) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Invalid C hex (0x) byte value: "${input}". Hex portion must be 1-2 hex digits (0-9, A-F)`,
+          path: [],
+        },
+      ]);
+    }
+    const parsed = parseInt(hexString, 16);
+    if (isNaN(parsed) || parsed < 0 || parsed > 0xff) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Byte value out of range: "${input}" (${parsed}). Must be 0x00-0xFF (0-255)`,
+          path: [],
+        },
+      ]);
+    }
+    return parsed;
+  }
+
+  // Try binary parsing
+  if (trimmed.startsWith('%')) {
+    // C64 style: %11111111
+    const binString = trimmed.slice(1);
+    if (!/^[01]{1,8}$/.test(binString)) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Invalid C64 binary (%) byte value: "${input}". Binary portion must be 1-8 binary digits (0-1)`,
+          path: [],
+        },
+      ]);
+    }
+    const parsed = parseInt(binString, 2);
+    if (isNaN(parsed) || parsed < 0 || parsed > 0xff) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Byte value out of range: "${input}" (${parsed}). Must be 0b00000000-0b11111111 (0-255)`,
+          path: [],
+        },
+      ]);
+    }
+    return parsed;
+  }
+
+  if (trimmed.toLowerCase().startsWith('0b')) {
+    // C-style binary: 0b11111111
+    const binString = trimmed.slice(2);
+    if (!/^[01]{1,8}$/.test(binString)) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Invalid C binary (0b) byte value: "${input}". Binary portion must be 1-8 binary digits (0-1)`,
+          path: [],
+        },
+      ]);
+    }
+    const parsed = parseInt(binString, 2);
+    if (isNaN(parsed) || parsed < 0 || parsed > 0xff) {
+      throw new z.ZodError([
+        {
+          code: 'custom',
+          message: `Byte value out of range: "${input}" (${parsed}). Must be 0b00000000-0b11111111 (0-255)`,
+          path: [],
+        },
+      ]);
+    }
+    return parsed;
+  }
+
+  // No recognized prefix
+  throw new z.ZodError([
+    {
+      code: 'custom',
+      message: `Invalid byte format: "${input}". Expected formats: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111). Bare hex/binary not supported to avoid ambiguity.`,
+      path: [],
+    },
+  ]);
+}
+
+export const byteValueSchema = z
+  .preprocess(parseByte, z.number().int().min(0).max(0xff))
+  .describe('8-bit byte value: decimal (255), hex with prefix ($FF, 0xFF), or binary with prefix (%11111111, 0b11111111)');
+
+export const byteArraySchema = z
+  .array(byteValueSchema)
+  .describe('Array of byte values in mixed formats: [255, "$FF", "%11111111", 42]');
 
 export const c64RegisterValueSchema = z.object(
   Object.fromEntries(
